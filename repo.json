@@ -1,0 +1,27 @@
+[
+  {
+    "Author": "Bryer",
+    "Name": "QuickSymbols",
+    "Punchline": "Adds a quick special-symbol picker beside the chat mode button.",
+    "Description": "Adds a Quick Symbols button beside the chat mode selector and other text inputs.",
+    "InternalName": "QuickSymbols",
+    "AssemblyVersion": "1.0.0.6",
+    "TestingAssemblyVersion": null,
+    "RepoUrl": "https://github.com/seventity7/QuickSymbols",
+    "ApplicableVersion": "any",
+    "DalamudApiLevel": 15,
+    "IsHide": false,
+    "IsTestingExclusive": false,
+    "DownloadCount": 0,
+    "LastUpdate": "1777569300",
+    "LoadPriority": 0,
+    "LoadRequiredState": 0,
+    "LoadSync": false,
+    "CanUnloadAsync": false,
+    "DownloadLinkInstall": "https://github.com/seventity7/QuickSymbols/releases/latest/download/QuickSymbols.zip",
+    "DownloadLinkTesting": "https://github.com/seventity7/QuickSymbols/releases/latest/download/QuickSymbols.zip",
+    "DownloadLinkUpdate": "https://github.com/seventity7/QuickSymbols/releases/latest/download/QuickSymbols.zip",
+    "IconUrl": "https://raw.githubusercontent.com/seventity7/QuickSymbols/main/icon.png",
+    "AcceptsFeedback": true
+  }
+]
