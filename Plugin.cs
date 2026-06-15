@@ -22,6 +22,10 @@ using FFXIVClientStructs.FFXIV.Client.UI;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 namespace QuickSymbols;
 
+// Had to clarify that Notes here can be a bit confusing since I initialy did
+// this project as a Tweak integration for SimpleTweaks, wich was not approved.
+// So I rebuild it as a actual plugin again instead.
+
 public sealed unsafe class Plugin : IDalamudPlugin
 {
     private const string ChatLogAddonName = "ChatLog";
@@ -42,7 +46,24 @@ public sealed unsafe class Plugin : IDalamudPlugin
     ];
 
     private const int MaxColumns = 10;
+
+    // Home tab | Main/default symbols list.
     private static readonly string[] Symbols = BuildSymbols();
+
+    // Numbers tab | Numeric symbols.
+    private static readonly string[] NumberSymbols = BuildNumberSymbols();
+
+    // Letters tab | Letter/alphabet related symbols.
+    private static readonly string[] LetterSymbols = BuildLetterSymbols();
+
+    // Common tab | Commonly used symbols + common text symbols.
+    private static readonly string[] CommonSymbols = BuildCommonSymbols();
+
+    // Time tab | Small curated set of time-related symbols.
+    private static readonly string[] TimeSymbols = BuildTimeSymbols();
+
+    // Others tab | Miscellaneous symbols + extra useful ones.
+    private static readonly string[] OthersSymbols = BuildOthersSymbols();
 
     private const string CommandShort = "/qs";
     private const string CommandLong = "/quicksymbols";
@@ -63,7 +84,7 @@ public sealed unsafe class Plugin : IDalamudPlugin
         public List<string> Custom { get; set; } = [];
 
         // Current plugin config keeps the original Quick Symbols field while
-        // still accepting the temporary tweak field name used by the SimpleTweaks version.
+        // still accepting the temporary tweak field name used by the SimpleTweaks version.(My old attempt of merging the plugin as a Tweak in SimpleTweaks. There is nothing to do with the plugin SimpleTweaks itself - Had to reclarify)
         public List<string> FavoriteSymbols { get; set; } = [];
         public List<string> favsymbols { get; set; } = [];
 
@@ -79,7 +100,7 @@ public sealed unsafe class Plugin : IDalamudPlugin
         public bool HasCustomButtonPosition { get; set; }
         public Vector2 ButtonPosition { get; set; }
 
-        // Compatibility with the temporary SimpleTweaks version of this code.
+        // Compatibility with the temporary SimpleTweaks version of this code. (Again, please read above)
         public bool HasCustombPosition { get; set; }
         public bool UsesRelativeButtonOffset { get; set; }
         public Vector2 bPosition { get; set; }
@@ -131,8 +152,29 @@ public sealed unsafe class Plugin : IDalamudPlugin
     // #
 
     // Scroll
+    // Home tab scroll
     private float symbolScrollY;
+
+    // Custom tab scroll
     private float customScrollY;
+
+    // Numbers tab scroll
+    private float numbersScrollY;
+
+    // Letters tab scroll
+    private float lettersScrollY;
+
+    // Common tab scroll
+    private float commonScrollY;
+
+    // Time tab scroll
+    private float timeScrollY;
+
+    // Others tab scroll
+    private float othersScrollY;
+    private float tabVisualIndex = -1f;
+    private int tabTargetIndex = -1;
+    private double tabMoveStartedAt;
     private bool draggingScrollBar;
     private float scrollDragOffsetY;
     private bool configWindowOpen;
@@ -1499,10 +1541,8 @@ public sealed unsafe class Plugin : IDalamudPlugin
                 drawList.AddText(closePos + (closeSize - xSize) * 0.5f, Color(xColor), xText);
 
                 var tabStartY = wPos.Y + padding + headerHeight;
-                ImGui.SetCursorScreenPos(new Vector2(wPos.X + padding, tabStartY));
-                this.DrawPopupTab("Symbols", PopupTab.Symbols, colors, tabHeight, scale);
-                ImGui.SameLine(0f, 6f * scale);
-                this.DrawPopupTab("Custom", PopupTab.Custom, colors, tabHeight, scale);
+                var tabWidth = pWidth - padding * 2f;
+                this.DrawPopupTabs(new Vector2(wPos.X + padding, tabStartY), tabWidth, tabHeight, colors, scale);
 
                 var contentStartY = tabStartY + tabHeight + contentGap;
                 var contentHeight = pHeight - padding - (contentStartY - wPos.Y);
@@ -1514,20 +1554,37 @@ public sealed unsafe class Plugin : IDalamudPlugin
                     this.keybindPopupPosValid = true;
                 }
 
+                // Custom tab | User-created entries from /qsconfig.
                 if (this.selectedPopupTab == PopupTab.Custom)
                 {
-                    if (cEntries.Count == 0)
-                    {
-                        ImGui.TextColored(colors.MutedText, "No custom entries configured yet - Type /qsconfig");
-                    }
-                    else
-                    {
-                        var customCellWidth = Math.Clamp(cEntries.Max(entry => ImGui.CalcTextSize(entry).X + 18f * scale), cell, gridWidth);
-                        var customColumns = Math.Clamp((int)((gridWidth + spacing) / (customCellWidth + spacing)), 1, columns);
-                        var customRows = Math.Max(1, (int)Math.Ceiling(cEntries.Count / (double)customColumns));
-                        this.DrawEntriesGrid(idSuffix, cEntries, customColumns, customRows, customCellWidth, cell, spacing, Math.Max(cell, contentHeight), scrollWidth, colors, insertTarget, ref this.customScrollY, allowfavs: false);
-                    }
+                    this.DrawCustomTab(idSuffix, cEntries, columns, gridWidth, cell, spacing, contentHeight, scrollWidth, colors, insertTarget);
                 }
+                // Numbers tab | Number symbols and regular circled/parenthesized number symbols.
+                else if (this.selectedPopupTab == PopupTab.Numbers)
+                {
+                    this.DrawCategoryTab(idSuffix, "Numbers", NumberSymbols, columns, cell, spacing, contentHeight, scrollWidth, colors, insertTarget, ref this.numbersScrollY);
+                }
+                // Letters tab | letter/alphabet style symbols.
+                else if (this.selectedPopupTab == PopupTab.Letters)
+                {
+                    this.DrawCategoryTab(idSuffix, "Letters", LetterSymbols, columns, cell, spacing, contentHeight, scrollWidth, colors, insertTarget, ref this.lettersScrollY);
+                }
+                // Common tab | Frequently useful symbols, separated from the full Home list.
+                else if (this.selectedPopupTab == PopupTab.Common)
+                {
+                    this.DrawCategoryTab(idSuffix, "Common", CommonSymbols, columns, cell, spacing, contentHeight, scrollWidth, colors, insertTarget, ref this.commonScrollY);
+                }
+                // Others tab | Large miscellaneous set that does not fit Numbers/Letters/Common/Time.
+                else if (this.selectedPopupTab == PopupTab.Others)
+                {
+                    this.DrawCategoryTab(idSuffix, "Others", OthersSymbols, columns, cell, spacing, contentHeight, scrollWidth, colors, insertTarget, ref this.othersScrollY);
+                }
+                // Time tab | Small time-related symbol group.
+                else if (this.selectedPopupTab == PopupTab.Time)
+                {
+                    this.DrawCategoryTab(idSuffix, "Time", TimeSymbols, columns, cell, spacing, contentHeight, scrollWidth, colors, insertTarget, ref this.timeScrollY);
+                }
+                // Home tab | Original full symbols list + Favorites.
                 else
                 {
                     var favsHeight = this.DrawfavsSection(idSuffix, columns, cell, spacing, gridWidth, colors, insertTarget);
@@ -1572,20 +1629,201 @@ public sealed unsafe class Plugin : IDalamudPlugin
         }
     }
 
-    private void DrawPopupTab(string label, PopupTab tab, UiColors colors, float height, float scale)
+    private void DrawPopupTabs(Vector2 start, float width, float height, UiColors colors, float scale)
     {
-        var active = this.selectedPopupTab == tab;
-        using (ImRaii.PushColor(ImGuiCol.Button, active ? colors.ButtonActive : colors.Button))
-        using (ImRaii.PushColor(ImGuiCol.ButtonHovered, colors.ButtonHovered))
-        using (ImRaii.PushColor(ImGuiCol.ButtonActive, colors.ButtonActive))
-        using (ImRaii.PushColor(ImGuiCol.Text, colors.Text))
+        // Popup tab bar | Visual order and icons for each tab.
+        var tabs = new[]
         {
-            var width = Math.Max(72f * scale, ImGui.CalcTextSize(label).X + 18f * scale);
-            if (ImGui.Button($"{label}##QuickSymbolsTab{label}", new Vector2(width, height)))
+            // Home tab | Full original symbols list.
+            (Tab: PopupTab.Symbols, Label: char.ConvertFromUtf32(0xF015), Tooltip: "Home", Icon: true),
+
+            // Numbers tab | Number-related symbols.
+            (Tab: PopupTab.Numbers, Label: char.ConvertFromUtf32(0xE69B), Tooltip: "Numbers", Icon: true),
+
+            // Letters tab | Letter-related symbols.
+            (Tab: PopupTab.Letters, Label: char.ConvertFromUtf32(0xF0FD), Tooltip: "Letters", Icon: true),
+
+            // Common tab | Most common misc symbols.
+            (Tab: PopupTab.Common, Label: char.ConvertFromUtf32(0xF86D), Tooltip: "Common", Icon: true),
+
+            // Others tab | Extended/miscellaneous symbols.
+            (Tab: PopupTab.Others, Label: char.ConvertFromUtf32(0xE0BB), Tooltip: "Others", Icon: true),
+
+            // Time tab | Time-related symbols.
+            (Tab: PopupTab.Time, Label: char.ConvertFromUtf32(0xF017), Tooltip: "Time", Icon: true),
+
+            // Custom tab | User-created symbols/strings.
+            (Tab: PopupTab.Custom, Label: char.ConvertFromUtf32(0xE185), Tooltip: "Custom", Icon: true),
+        };
+
+        var targetIndex = Math.Max(0, Array.FindIndex(tabs, tab => tab.Tab == this.selectedPopupTab));
+        if (this.tabVisualIndex < 0f)
+        {
+            this.tabVisualIndex = targetIndex;
+            this.tabTargetIndex = targetIndex;
+            this.tabMoveStartedAt = ImGui.GetTime();
+        }
+
+        if (this.tabTargetIndex != targetIndex)
+        {
+            this.tabVisualIndex = this.GetAnimatedTabIndex();
+            this.tabTargetIndex = targetIndex;
+            this.tabMoveStartedAt = ImGui.GetTime();
+        }
+
+        var drawList = ImGui.GetWindowDrawList();
+        var max = start + new Vector2(width, height);
+        var pieceWidth = width / tabs.Length;
+        var visualIndex = this.GetAnimatedTabIndex();
+        var pillMin = new Vector2(start.X + pieceWidth * visualIndex + 3f * scale, start.Y + 3f * scale);
+        var pillSize = new Vector2(pieceWidth - 6f * scale, height - 6f * scale);
+
+        drawList.AddRectFilled(start, max, Color(colors.CellBackground), 5f * scale);
+        drawList.AddRect(start, max, Color(colors.Border), 5f * scale, ImDrawFlags.None, Math.Max(1f, scale));
+        drawList.AddRectFilled(pillMin, pillMin + pillSize, Color(colors.ButtonActive), 4f * scale);
+
+        for (var i = 0; i < tabs.Length; i++)
+        {
+            var tab = tabs[i];
+            var selected = i == targetIndex;
+            var min = start + new Vector2(pieceWidth * i + 3f * scale, 3f * scale);
+            var size = new Vector2(pieceWidth - 6f * scale, height - 6f * scale);
+            var maxItem = min + size;
+
+            ImGui.SetCursorScreenPos(min);
+            ImGui.InvisibleButton($"##QuickSymbolsTab{tab.Tab}", size);
+            var hovered = ImGui.IsItemHovered();
+            if (!selected && hovered)
             {
-                this.selectedPopupTab = tab;
+                drawList.AddRectFilled(min, maxItem, Color(colors.CellHovered), 4f * scale);
+            }
+
+            if (ImGui.IsItemClicked())
+            {
+                this.selectedPopupTab = tab.Tab;
+            }
+
+            if (hovered)
+            {
+                ImGui.SetTooltip(tab.Tooltip);
+            }
+
+            var textColor = selected ? colors.Text : colors.MutedText;
+            IDisposable? font = null;
+            if (tab.Icon)
+            {
+                font = PushQuickSymbolsIconFont();
+            }
+
+            using (font)
+            {
+                var labelSize = ImGui.CalcTextSize(tab.Label);
+                drawList.AddText(
+                    new Vector2(min.X + (size.X - labelSize.X) * 0.5f, min.Y + (size.Y - labelSize.Y) * 0.5f),
+                    ImGui.GetColorU32(textColor),
+                    tab.Label);
             }
         }
+    }
+
+    private float GetAnimatedTabIndex()
+    {
+        var age = Math.Clamp((float)((ImGui.GetTime() - this.tabMoveStartedAt) / 0.18), 0f, 1f);
+        var move = 1f - MathF.Pow(1f - age, 3f);
+        var visual = this.tabVisualIndex + (this.tabTargetIndex - this.tabVisualIndex) * move;
+        if (age >= 1f)
+        {
+            this.tabVisualIndex = this.tabTargetIndex;
+            return this.tabTargetIndex;
+        }
+
+        return visual;
+    }
+
+    // Custom tab | Shows only user-created entries and the Create custom button when empty.
+    private void DrawCustomTab(
+        string idSuffix, IReadOnlyList<string> entries, int columns, float gridWidth, float cell, float spacing,
+        float contentHeight, float scrollWidth, UiColors colors, SymbolInsertTarget insertTarget)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var start = ImGui.GetCursorScreenPos();
+        var drawList = ImGui.GetWindowDrawList();
+        var titleHeight = ImGui.GetTextLineHeight() + 8f * scale;
+
+        ImGui.TextColored(colors.MutedText, "Custom");
+        var dividerY = start.Y + titleHeight - 3f * scale;
+        drawList.AddLine(
+            new Vector2(start.X, dividerY),
+            new Vector2(start.X + ImGui.GetContentRegionAvail().X, dividerY),
+            Color(colors.Border),
+            Math.Max(1f, scale));
+
+        var bodyStart = new Vector2(start.X, start.Y + titleHeight);
+        var bodyHeight = Math.Max(cell, contentHeight - titleHeight);
+        ImGui.SetCursorScreenPos(bodyStart);
+
+        if (entries.Count == 0)
+        {
+            var buttonSize = new Vector2(Math.Max(120f * scale, ImGui.CalcTextSize("Create custom").X + 24f * scale), 28f * scale);
+            var buttonPos = new Vector2(
+                start.X + (gridWidth - buttonSize.X) * 0.5f,
+                bodyStart.Y + Math.Max(0f, (bodyHeight - buttonSize.Y) * 0.5f));
+
+            ImGui.SetCursorScreenPos(buttonPos);
+            ImGui.InvisibleButton($"Create custom##QuickSymbolsCreateCustom{idSuffix}", buttonSize);
+            var hovered = ImGui.IsItemHovered();
+            var active = ImGui.IsItemActive();
+            if (ImGui.IsItemClicked())
+            {
+                this.configWindowOpen = true;
+            }
+
+            var buttonColor = active ? colors.ButtonActive : hovered ? colors.ButtonHovered : colors.Button;
+            drawList.AddRectFilled(buttonPos, buttonPos + buttonSize, Color(buttonColor), 4f * scale);
+            drawList.AddRect(buttonPos, buttonPos + buttonSize, Color(colors.Border), 4f * scale, ImDrawFlags.None, Math.Max(1f, scale));
+            var buttonText = "Create custom";
+            var textSize = ImGui.CalcTextSize(buttonText);
+            drawList.AddText(buttonPos + (buttonSize - textSize) * 0.5f, Color(colors.Text), buttonText);
+
+            return;
+        }
+
+        var customCellWidth = Math.Clamp(entries.Max(entry => ImGui.CalcTextSize(entry).X + 18f * scale), cell, gridWidth);
+        var customColumns = Math.Clamp((int)((gridWidth + spacing) / (customCellWidth + spacing)), 1, columns);
+        var customRows = Math.Max(1, (int)Math.Ceiling(entries.Count / (double)customColumns));
+        this.DrawEntriesGrid(idSuffix, entries, customColumns, customRows, customCellWidth, cell, spacing, bodyHeight, scrollWidth, colors, insertTarget, ref this.customScrollY, allowfavs: false);
+    }
+
+    // Category tabs | Shared renderer used by Numbers, Letters, Common, Others and Time.
+    // Each category passes its own title, symbol list and scroll value.
+    private void DrawCategoryTab(
+        string idSuffix, string title, IReadOnlyList<string> entries, int columns, float cell, float spacing,
+        float contentHeight, float scrollWidth, UiColors colors, SymbolInsertTarget insertTarget, ref float scrollY)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var start = ImGui.GetCursorScreenPos();
+        var gridWidth = columns * cell + Math.Max(0, columns - 1) * spacing;
+        var favsHeight = this.DrawfavsSection(idSuffix, columns, cell, spacing, gridWidth, colors, insertTarget);
+        if (favsHeight > 0f)
+        {
+            ImGui.SetCursorScreenPos(new Vector2(start.X, start.Y + favsHeight));
+        }
+
+        start = ImGui.GetCursorScreenPos();
+        var drawList = ImGui.GetWindowDrawList();
+        var titleHeight = ImGui.GetTextLineHeight() + 8f * scale;
+
+        ImGui.TextColored(colors.MutedText, title);
+        var dividerY = start.Y + titleHeight - 3f * scale;
+        drawList.AddLine(
+            new Vector2(start.X, dividerY),
+            new Vector2(start.X + ImGui.GetContentRegionAvail().X, dividerY),
+            Color(colors.Border),
+            Math.Max(1f, scale));
+
+        ImGui.SetCursorScreenPos(new Vector2(start.X, start.Y + titleHeight));
+        var rows = Math.Max(1, (int)Math.Ceiling(entries.Count / (double)columns));
+        this.DrawEntriesGrid(idSuffix, entries, columns, rows, cell, cell, spacing, Math.Max(cell, contentHeight - favsHeight - titleHeight), scrollWidth, colors, insertTarget, ref scrollY, allowfavs: true);
     }
 
     private IReadOnlyList<string> GetcEntries()
@@ -1629,13 +1867,16 @@ public sealed unsafe class Plugin : IDalamudPlugin
 
         pushedFont?.Dispose();
 
-        dList.AddLine(
-            new Vector2(origin.X, dividerY),
-            new Vector2(origin.X + gridWidth, dividerY),
-            Color(colors.CellBorder),
-            Math.Max(1f, scale));
+        if (this.selectedPopupTab == PopupTab.Symbols)
+        {
+            dList.AddLine(
+                new Vector2(origin.X, dividerY),
+                new Vector2(origin.X + gridWidth, dividerY),
+                Color(colors.CellBorder),
+                Math.Max(1f, scale));
+        }
 
-        var totalHeight = labelHeight + favsGridHeight + 12f * scale;
+        var totalHeight = labelHeight + favsGridHeight + (this.selectedPopupTab == PopupTab.Symbols ? 12f : 8f) * scale;
         ImGui.SetCursorScreenPos(new Vector2(origin.X, origin.Y + totalHeight));
         return totalHeight;
     }
@@ -2441,6 +2682,7 @@ public sealed unsafe class Plugin : IDalamudPlugin
         return ImGui.GetColorU32(color);
     }
 
+    // Home tab symbols | Original full game-symbol list.
     private static string[] BuildSymbols()
     {
         var symbols = new List<string>();
@@ -2503,10 +2745,113 @@ public sealed unsafe class Plugin : IDalamudPlugin
         return symbols.ToArray();
     }
 
+    // Numbers tab symbols | Game number ranges + Unicode number variants.
+    private static string[] BuildNumberSymbols()
+    {
+        var symbols = new List<string>();
+        AddRange(symbols, 0xE060, 0xE069);
+        AddRange(symbols, 0xE08F, 0xE09F);
+        AddRange(symbols, 0xE0A0, 0xE0AE);
+        AddRange(symbols, 0xE0B1, 0xE0B9);
+        AddRange(symbols, 0xE0E0, 0xE0E9);
+        AddTextSymbols(symbols, "⓪①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳⑴⑵⑶⑷⑸⑹⑺⑻⑼⑽⑾⑿⒀⒁⒂⒃⒄⒅⒆⒇⒈⒉⒊⒋⒌⒍⒎⒏⒐");
+        return symbols.ToArray();
+    }
+
+    // Letters tab symbols | letter/alphabet related symbols.
+    private static string[] BuildLetterSymbols()
+    {
+        var symbols = new List<string>
+        {
+            char.ConvertFromUtf32(0xE022),
+            char.ConvertFromUtf32(0xE024),
+        };
+
+        AddRange(symbols, 0xE071, 0xE07F);
+        AddRange(symbols, 0xE080, 0xE08A);
+        return symbols.ToArray();
+    }
+
+    // Common tab symbols | Frequently useful symbols and small text symbols.
+    private static string[] BuildCommonSymbols()
+    {
+        var symbols = new List<string>();
+        AddRange(symbols, 0xE031, 0xE03F);
+        AddRange(symbols, 0xE040, 0xE044);
+        AddRange(symbols, 0xE048, 0xE04E);
+        AddRange(symbols, 0xE050, 0xE05E);
+        AddRange(symbols, 0xE06A, 0xE06F);
+        AddRange(symbols, 0xE070, 0xE070);
+        AddRange(symbols, 0xE0AF, 0xE0AF);
+        AddRange(symbols, 0xE0BA, 0xE0BF);
+        AddRange(symbols, 0xE0C0, 0xE0C0);
+        AddTextSymbols(symbols, "★☆♠♡♢♣♤♥♦♧♪♭♯");
+        return symbols.ToArray();
+    }
+
+    // Time tab symbols | Curated time-related symbols.
+    private static string[] BuildTimeSymbols()
+    {
+        return
+        [
+            char.ConvertFromUtf32(0xE031),
+            char.ConvertFromUtf32(0xE06B),
+            char.ConvertFromUtf32(0xE06D),
+            char.ConvertFromUtf32(0xE06E),
+            char.ConvertFromUtf32(0xE0D0),
+            char.ConvertFromUtf32(0xE0D1),
+            char.ConvertFromUtf32(0xE0D2),
+        ];
+    }
+
+    // Others tab symbols | Miscellaneous and extra Unicode symbols.
+    private static string[] BuildOthersSymbols()
+    {
+        var symbols = new List<string>();
+        AddRange(symbols, 0xE0D9, 0xE0DB);
+        AddRange(symbols, 0xE0C1, 0xE0C6);
+        AddRange(symbols, 0xE020, 0xE021);
+        symbols.Add(char.ConvertFromUtf32(0xE023));
+        AddRange(symbols, 0xE025, 0xE02B);
+        AddRange(symbols, 0xE050, 0xE05A);
+        AddTextSymbols(symbols, "☀☁☂☃℃℉°。・○◎●□■△▼◆◇←↑→↓⇔⇒©®™℡№§¶$€¥£¢¤円∀∂∃⊇⊂≠≡≦∽∫∥∙∋∀+-=┓┗┐└┏┛』『」「┘┌├┝┥┤┣┠┨┫┰┯┬┳┴┷┼┻┸┿╂╂┿╋〒⊥∟㎎㎏㎜㎝㎞㎡㏄‐–—―‘’‚“”„†‡•‥…‰′⌒ωεïз✓♀†Å");
+        return symbols.ToArray();
+    }
+
+    private static void AddTextSymbols(List<string> symbols, string text)
+    {
+        for (var i = 0; i < text.Length; i++)
+        {
+            if (char.IsWhiteSpace(text, i))
+            {
+                continue;
+            }
+
+            var codepoint = char.ConvertToUtf32(text, i);
+            if (char.IsHighSurrogate(text[i]))
+            {
+                i++;
+            }
+
+            symbols.Add(char.ConvertFromUtf32(codepoint));
+        }
+    }
+
+    private static void AddRange(List<string> symbols, int startInclusive, int endInclusive)
+    {
+        for (var codepoint = startInclusive; codepoint <= endInclusive; codepoint++)
+        {
+            symbols.Add(char.ConvertFromUtf32(codepoint));
+        }
+    }
+
 
     // Auxiliary Types
     private enum PopupPlacement { AboveRight, Below }
-    private enum PopupTab { Symbols, Custom }
+
+    // Popup tabs | Must match the tab routing in DrawSymbolsPopup and the visual order in DrawPopupTabs.
+    private enum PopupTab { Symbols, Numbers, Letters, Common, Others, Time, Custom }
+
     private enum SymbolInsertTarget { Chat, RecruitmentComment, MessageBookInput, FocusedTextInput }
     private readonly unsafe struct TextInputTarget
     {
