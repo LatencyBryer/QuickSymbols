@@ -26,7 +26,7 @@ namespace QuickSymbols;
 // this project as a Tweak integration for SimpleTweaks, wich was not approved.
 // So I rebuild it as a actual plugin again instead.
 
-public sealed unsafe class Plugin : IDalamudPlugin
+public sealed unsafe partial class Plugin : IDalamudPlugin
 {
     private const string ChatLogAddonName = "ChatLog";
     private static readonly string[] RecruitmentCriteriaAddonNames =
@@ -69,6 +69,7 @@ public sealed unsafe class Plugin : IDalamudPlugin
     private const string CommandLong = "/quicksymbols";
     private const string CommandConfig = "/qsconfig";
 
+
     [PluginService] internal static IDalamudPluginInterface PluginInterface { get; private set; } = null!;
     [PluginService] internal static IGameGui GameGui { get; private set; } = null!;
     [PluginService] internal static IFramework Framework { get; private set; } = null!;
@@ -110,6 +111,7 @@ public sealed unsafe class Plugin : IDalamudPlugin
     }
 
     private readonly PluginConfiguration Config;
+
 
     // UI and State stuff
     private IFontHandle? symbolFont;
@@ -190,6 +192,13 @@ public sealed unsafe class Plugin : IDalamudPlugin
         this.Config = PluginInterface.GetPluginConfig() as PluginConfiguration ?? new PluginConfiguration();
         this.ConfigChanged();
 
+        this.ipcGetVersion = PluginInterface.GetIpcProvider<int>(IpcGetVersion);
+        this.ipcOpenPicker = PluginInterface.GetIpcProvider<string, bool>(IpcOpenPicker);
+        this.ipcClosePicker = PluginInterface.GetIpcProvider<string, bool>(IpcClosePicker);
+        this.ipcGetHotkey = PluginInterface.GetIpcProvider<int[]>(IpcGetHotkey);
+        this.ipcSymbolSelected = PluginInterface.GetIpcProvider<string, string, object?>(IpcSymbolSelected);
+        this.RegisterIpc();
+
         this.symbolFont = PluginInterface.UiBuilder.FontAtlas.NewGameFontHandle(new GameFontStyle(GameFontFamily.Axis, 18f));
         PluginInterface.UiBuilder.Draw += this.Draw;
         PluginInterface.UiBuilder.OpenConfigUi += this.OpenConfigWindow;
@@ -243,6 +252,7 @@ public sealed unsafe class Plugin : IDalamudPlugin
         CommandManager.RemoveHandler(CommandLong);
         CommandManager.RemoveHandler(CommandConfig);
 
+        this.UnregisterIpc();
         this.symbolFont?.Dispose();
         this.keybindTextInput = null;
         this.SaveConfig();
@@ -1061,6 +1071,15 @@ public sealed unsafe class Plugin : IDalamudPlugin
                 this.keybindPopupAnchorSize, PopupPlacement.Below, includePositionEditor: false, SymbolInsertTarget.FocusedTextInput, ref this.keybindPopupOpen);
         }
 
+        if (this.ipcPopupOpen)
+        {
+            this.DrawSymbolsPopup(
+                "Ipc",
+                colors,
+                this.ipcPopupAnchorPos,
+                this.ipcPopupAnchorSize, PopupPlacement.Below, includePositionEditor: false, SymbolInsertTarget.IpcCallback, ref this.ipcPopupOpen);
+        }
+
         this.leftMouseWasDown = mouseDownNow;
     }
 
@@ -1096,6 +1115,9 @@ public sealed unsafe class Plugin : IDalamudPlugin
         this.partyFinderPopupOpen = false;
         this.messageBookPopupOpen = false;
         this.keybindPopupOpen = false;
+        this.ipcPopupOpen = false;
+        this.ipcPopupOwner = null;
+        this.ipcPopupRaiseFrames = 0;
         this.keybindPopupPosValid = false;
         if (clearKeybindTarget)
         {
@@ -1419,15 +1441,19 @@ public sealed unsafe class Plugin : IDalamudPlugin
         ImGui.SetNextWindowPos(popupPos, posCond);
         ImGui.SetNextWindowSize(new Vector2(pWidth, pHeight), ImGuiCond.Always);
 
+        var keepAboveOtherPlugin = insertTarget == SymbolInsertTarget.IpcCallback;
         var flags = ImGuiWindowFlags.NoDecoration
                     | ImGuiWindowFlags.NoSavedSettings
                     | ImGuiWindowFlags.NoCollapse
                     | ImGuiWindowFlags.NoResize
                     | ImGuiWindowFlags.NoScrollbar
                     | ImGuiWindowFlags.NoScrollWithMouse
-                    | ImGuiWindowFlags.NoFocusOnAppearing
-                    | ImGuiWindowFlags.NoBringToFrontOnFocus
                     | ImGuiWindowFlags.NoNav;
+
+        if (!keepAboveOtherPlugin)
+        {
+            flags |= ImGuiWindowFlags.NoFocusOnAppearing | ImGuiWindowFlags.NoBringToFrontOnFocus;
+        }
 
         var beginCalled = false;
 
@@ -1439,10 +1465,17 @@ public sealed unsafe class Plugin : IDalamudPlugin
 
         try
         {
-            var windowVisible = ImGui.Begin($"##QuickSymbolsPopup{idSuffix}", flags);
+            var popupWindowName = $"##QuickSymbolsPopup{idSuffix}";
+            var windowVisible = ImGui.Begin(popupWindowName, flags);
             beginCalled = true;
             if (windowVisible)
             {
+                if (keepAboveOtherPlugin && this.ipcPopupRaiseFrames > 0)
+                {
+                    ImGui.SetWindowFocus(popupWindowName);
+                    this.ipcPopupRaiseFrames--;
+                }
+
                 var wPos = ImGui.GetWindowPos();
                 var drawList = ImGui.GetWindowDrawList();
                 var title = "Bryer - Quick Symbols";
@@ -1604,7 +1637,8 @@ public sealed unsafe class Plugin : IDalamudPlugin
                     var insideMainButton = this.popupOpen && mouse.X >= this.currentbPos.X && mouse.X <= this.currentbPos.X + this.currentbSize.X && mouse.Y >= this.currentbPos.Y && mouse.Y <= this.currentbPos.Y + this.currentbSize.Y;
                     var insidePfButton = this.partyFinderPopupOpen && mouse.X >= this.partyFinderbPos.X && mouse.X <= this.partyFinderbPos.X + this.partyFinderbSize.X && mouse.Y >= this.partyFinderbPos.Y && mouse.Y <= this.partyFinderbPos.Y + this.partyFinderbSize.Y;
                     var insideMsgButton = this.messageBookPopupOpen && mouse.X >= this.messageBookbPos.X && mouse.X <= this.messageBookbPos.X + this.messageBookbSize.X && mouse.Y >= this.messageBookbPos.Y && mouse.Y <= this.messageBookbPos.Y + this.messageBookbSize.Y;
-                    if (!insidePopup && !insideMainButton && !insidePfButton && !insideMsgButton)
+                    var insideIpcAnchor = this.ipcPopupOpen && mouse.X >= this.ipcPopupAnchorPos.X && mouse.X <= this.ipcPopupAnchorPos.X + this.ipcPopupAnchorSize.X && mouse.Y >= this.ipcPopupAnchorPos.Y && mouse.Y <= this.ipcPopupAnchorPos.Y + this.ipcPopupAnchorSize.Y;
+                    if (!insidePopup && !insideMainButton && !insidePfButton && !insideMsgButton && !insideIpcAnchor)
                     {
                         isOpen = false;
                         if (idSuffix == "Keybind")
@@ -2081,6 +2115,12 @@ public sealed unsafe class Plugin : IDalamudPlugin
         if (insertTarget == SymbolInsertTarget.MessageBookInput)
         {
             this.InsertTextIntoMessageBook(symbol);
+            return;
+        }
+
+        if (insertTarget == SymbolInsertTarget.IpcCallback)
+        {
+            this.SendSymbolToIpcOwner(symbol);
             return;
         }
 
@@ -2852,7 +2892,7 @@ public sealed unsafe class Plugin : IDalamudPlugin
     // Popup tabs | Must match the tab routing in DrawSymbolsPopup and the visual order in DrawPopupTabs.
     private enum PopupTab { Symbols, Numbers, Letters, Common, Others, Time, Custom }
 
-    private enum SymbolInsertTarget { Chat, RecruitmentComment, MessageBookInput, FocusedTextInput }
+    private enum SymbolInsertTarget { Chat, RecruitmentComment, MessageBookInput, FocusedTextInput, IpcCallback }
     private readonly unsafe struct TextInputTarget
     {
         public TextInputTarget(AtkUnitBase* addon, AtkComponentTextInput* input, AtkResNode* node, Vector2 position, Vector2 size)
