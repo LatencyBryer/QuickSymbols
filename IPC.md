@@ -22,6 +22,7 @@ Use `QuickSymbols.GetVersion` if your plugin needs to check compatibility before
 | --- | --- | --- |
 | `QuickSymbols.GetVersion` | Function | Returns the current QuickSymbols IPC version. |
 | `QuickSymbols.GetHotkey` | Function | Returns the current picker hotkey configured by the user. |
+| `QuickSymbols.WatchInput` | Function | Marks a consumer plugin input as active for the QuickSymbols keybind. |
 | `QuickSymbols.OpenPicker` | Function | Opens the QuickSymbols picker for a specific owner key. |
 | `QuickSymbols.ClosePicker` | Function | Closes the picker for a specific owner key. |
 | `QuickSymbols.SymbolSelected` | Event | Notifies subscribers when the user selects a symbol. |
@@ -64,6 +65,23 @@ if (keys.Length == 0)
 ```
 
 ---
+
+---
+
+### `QuickSymbols.WatchInput`
+
+Marks a consumer plugin input as currently active.
+
+This is the preferred integration path for plugin-owned ImGui inputs. The consumer plugin calls this while its own input is active, and QuickSymbols remains responsible for detecting the user's configured QuickSymbols keybind. This avoids requiring the consumer plugin to read or duplicate QuickSymbols keybind logic.
+
+```csharp
+var watchInput = pluginInterface.GetIpcSubscriber<string, bool>("QuickSymbols.WatchInput");
+var watched = watchInput.InvokeFunc("ExamplePlugin");
+```
+
+Returns `true` when QuickSymbols accepted the active input watch request.
+
+The watch behaves like a short-lived heartbeat. Call it while the input is active; when it stops being called, QuickSymbols should no longer treat that owner as the active target.
 
 ### `QuickSymbols.OpenPicker`
 
@@ -137,9 +155,9 @@ if (quickSymbolsSelected != null && onQuickSymbolsSelected != null)
 ## Recommended Integration Flow
 
 1. Your plugin detects that its own text input is focused.
-2. Your plugin reads the user's QuickSymbols hotkey with `QuickSymbols.GetHotkey`.
-3. When that keybind is pressed, your plugin calls `QuickSymbols.OpenPicker("YourPluginName")`.
-4. QuickSymbols shows the symbol picker.
+2. While the input is active, your plugin calls `QuickSymbols.WatchInput("YourPluginName")`.
+3. QuickSymbols detects the user's configured QuickSymbols keybind itself.
+4. QuickSymbols shows the symbol picker for the watched owner.
 5. The user clicks a symbol.
 6. QuickSymbols sends `QuickSymbols.SymbolSelected("YourPluginName", symbol)`.
 7. Your plugin inserts the symbol into its own input and updates its own caret state.
@@ -154,6 +172,8 @@ if (quickSymbolsSelected != null && onQuickSymbolsSelected != null)
 - Insert the received symbol into your own text buffer.
 - Update your own caret/selection state after insertion.
 - Use a unique owner key, for example `"CreateXIV"` or `"Clock"`.
+- Prefer `QuickSymbols.WatchInput` for plugin-owned ImGui inputs so QuickSymbols owns its own keybind detection.
+- Use `QuickSymbols.GetHotkey` only if your plugin has a specific reason to detect the keybind itself.
 - Wrap IPC calls in `try/catch` so your plugin still works when QuickSymbols is not installed or not loaded.
 - If the picker should only be used while a specific input is active, close it when that input loses focus.
 
@@ -162,8 +182,7 @@ if (quickSymbolsSelected != null && onQuickSymbolsSelected != null)
 ## Minimal Consumer Example
 
 ```csharp
-private ICallGateSubscriber<int[]>? quickSymbolsHotkey;
-private ICallGateSubscriber<string, bool>? quickSymbolsOpenPicker;
+private ICallGateSubscriber<string, bool>? quickSymbolsWatchInput;
 private ICallGateSubscriber<string, bool>? quickSymbolsClosePicker;
 private ICallGateSubscriber<string, string, object?>? quickSymbolsSelected;
 private Action<string, string>? quickSymbolsSelectedHandler;
@@ -172,8 +191,7 @@ private const string QuickSymbolsOwner = "ExamplePlugin";
 
 private void RegisterQuickSymbolsIpc(IDalamudPluginInterface pluginInterface)
 {
-    quickSymbolsHotkey = pluginInterface.GetIpcSubscriber<int[]>("QuickSymbols.GetHotkey");
-    quickSymbolsOpenPicker = pluginInterface.GetIpcSubscriber<string, bool>("QuickSymbols.OpenPicker");
+    quickSymbolsWatchInput = pluginInterface.GetIpcSubscriber<string, bool>("QuickSymbols.WatchInput");
     quickSymbolsClosePicker = pluginInterface.GetIpcSubscriber<string, bool>("QuickSymbols.ClosePicker");
     quickSymbolsSelected = pluginInterface.GetIpcSubscriber<string, string, object?>("QuickSymbols.SymbolSelected");
 
@@ -188,11 +206,23 @@ private void RegisterQuickSymbolsIpc(IDalamudPluginInterface pluginInterface)
     quickSymbolsSelected.Subscribe(quickSymbolsSelectedHandler);
 }
 
-private void OpenQuickSymbolsPicker()
+private void WatchQuickSymbolsInput()
 {
     try
     {
-        quickSymbolsOpenPicker?.InvokeFunc(QuickSymbolsOwner);
+        quickSymbolsWatchInput?.InvokeFunc(QuickSymbolsOwner);
+    }
+    catch
+    {
+        // QuickSymbols is not available.
+    }
+}
+
+private void CloseQuickSymbolsPicker()
+{
+    try
+    {
+        quickSymbolsClosePicker?.InvokeFunc(QuickSymbolsOwner);
     }
     catch
     {
@@ -202,6 +232,8 @@ private void OpenQuickSymbolsPicker()
 
 private void DisposeQuickSymbolsIpc()
 {
+    CloseQuickSymbolsPicker();
+
     if (quickSymbolsSelected != null && quickSymbolsSelectedHandler != null)
     {
         quickSymbolsSelected.Unsubscribe(quickSymbolsSelectedHandler);

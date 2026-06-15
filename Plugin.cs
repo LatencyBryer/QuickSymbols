@@ -196,6 +196,7 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         this.ipcOpenPicker = PluginInterface.GetIpcProvider<string, bool>(IpcOpenPicker);
         this.ipcClosePicker = PluginInterface.GetIpcProvider<string, bool>(IpcClosePicker);
         this.ipcGetHotkey = PluginInterface.GetIpcProvider<int[]>(IpcGetHotkey);
+        this.ipcWatchInput = PluginInterface.GetIpcProvider<string, bool>(IpcWatchInput);
         this.ipcSymbolSelected = PluginInterface.GetIpcProvider<string, string, object?>(IpcSymbolSelected);
         this.RegisterIpc();
 
@@ -820,6 +821,11 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
             return;
         }
 
+        if (this.TryOpenWatchedInputPopup())
+        {
+            return;
+        }
+
         this.TryOpenKeybindPopupFromCurrentFocus();
     }
 
@@ -1117,6 +1123,8 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         this.keybindPopupOpen = false;
         this.ipcPopupOpen = false;
         this.ipcPopupOwner = null;
+        this.ipcActiveOwner = null;
+        this.ipcActiveFrames = 0;
         this.ipcPopupRaiseFrames = 0;
         this.keybindPopupPosValid = false;
         if (clearKeybindTarget)
