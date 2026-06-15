@@ -27,7 +27,7 @@ QuickSymbols button currently appears for:
 - Housing Message Book message field
 > **You can use the Keybind to open the popup list in any Text Field from any other windows like User Macros for example.**
 
-For IPC usage please [Click Here](https://github.com/LatencyBryer/QuickSymbols/blob/main/README-IPC.md).
+For IPC usage please [Click Here](https://github.com/LatencyBryer/QuickSymbols/blob/main/IPC.md).
 
 ### Favorites
 
