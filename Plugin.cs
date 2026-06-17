@@ -117,9 +117,6 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
 
         // Users can enable this so the list uses Dalamud style instead of FFXIV theme.
         public bool UseDalamudTheme { get; set; }
-
-        // Stored outside the theme colors so the chosen opacity stays the same when the user changes themes.
-        public float BackgroundOpacity { get; set; } = 0.6f;
         public bool ConfigWindowHadFirstOpen { get; set; }
     }
 
@@ -143,6 +140,9 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
     private bool editbPosition;
     private bool draggingButton;
     private bool bPositionDirty;
+    // Position changes can happen every draw frame while dragging, so saving is delayed to FrameworkUpdate.
+    // This avoids stacking multiple SavePluginConfig writes while Dalamud is still writing the previous config.
+    private bool bPositionSaveQueued;
     private Vector2 nativebPos;
     private Vector2 currentbPos;
     private Vector2 currentbSize;
@@ -233,7 +233,6 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         this.Config.favsymbols ??= [];
         this.Config.History ??= [];
         this.Config.ToggleHotkey = NormalizeHotkey(this.Config.ToggleHotkey ?? [VirtualKey.MENU, VirtualKey.S]);
-        this.Config.BackgroundOpacity = NormalizeOpacity(this.Config.BackgroundOpacity);
 
         if (this.Config.favsymbols.Count == 0 && this.Config.FavoriteSymbols.Count > 0)
         {
@@ -256,20 +255,6 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         }
     }
 
-    private static float NormalizeOpacity(float opacity)
-    {
-        return float.IsNaN(opacity) || float.IsInfinity(opacity)
-            ? 1f
-            : Math.Clamp(opacity, 0f, 1f);
-    }
-
-    private Vector4 PopupBg(Vector4 color)
-    {
-        // Opacity only touches QuickSymbols popup surfaces. Text, icons, borders and other Dalamud windows stay untouched.
-        var alpha = NormalizeOpacity(this.Config.BackgroundOpacity);
-        return new Vector4(color.X, color.Y, color.Z, alpha);
-    }
-
     public void Dispose()
     {
         Framework.Update -= this.FrameworkUpdate;
@@ -284,6 +269,7 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         this.UnregisterIpc();
         this.symbolFont?.Dispose();
         this.keybindTextInput = null;
+        this.FlushButtonPositionSave();
         this.SaveConfig();
     }
 
@@ -824,16 +810,6 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
             ImGui.SetTooltip("Use your Dalamud theme instead of FFXIV themes for the popup list.");
         }
 
-        // This slider affects only the popup window background and symbol-cell backgrounds.
-        // Keeping it separate avoids pushing global ImGui alpha and accidentally touching other plugin windows.
-        var backgroundOpacity = NormalizeOpacity(this.Config.BackgroundOpacity) * 100f;
-        ImGui.SetNextItemWidth(Math.Max(180f, ImGui.GetContentRegionAvail().X * 0.48f));
-        if (ImGui.SliderFloat("Background opacity", ref backgroundOpacity, 0f, 100f, "%.0f%%"))
-        {
-            this.Config.BackgroundOpacity = NormalizeOpacity(backgroundOpacity / 100f);
-            hasChanged = true;
-        }
-
         var closeOnFocus = this.Config.ClosePopupOnLostFocus;
         if (ImGui.Checkbox("Close popup on lost focus", ref closeOnFocus))
         {
@@ -901,6 +877,8 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
 
     private void FrameworkUpdate(IFramework framework)
     {
+        this.FlushButtonPositionSave();
+
         if (this.hotkeyRecording)
         {
             if (this.ProcessHotkeyRecordingInput())
@@ -1258,7 +1236,7 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
             this.bPositionDirty = true;
         }
 
-        this.SaveConfigurationIfDirty();
+        this.QueueButtonPositionSave();
         return clamped;
     }
 
@@ -1534,7 +1512,7 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         else if (this.draggingButton && !this.IsLeftMouseDown())
         {
             this.draggingButton = false;
-            this.SaveConfigurationIfDirty();
+            this.QueueButtonPositionSave();
         }
     }
 
@@ -1617,7 +1595,7 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         using var pPadding = ImRaii.PushStyle(ImGuiStyleVar.WindowPadding, new Vector2(padding, padding));
         using var pBorderSize = ImRaii.PushStyle(ImGuiStyleVar.WindowBorderSize, 1f * scale);
         using var pRounding = ImRaii.PushStyle(ImGuiStyleVar.WindowRounding, 8f * scale);
-        using var pBackground = ImRaii.PushColor(ImGuiCol.WindowBg, this.PopupBg(colors.PopupBackground));
+        using var pBackground = ImRaii.PushColor(ImGuiCol.WindowBg, colors.PopupBackground);
         using var pBorder = ImRaii.PushColor(ImGuiCol.Border, colors.Border);
 
         try
@@ -1657,7 +1635,7 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
                         isOpen = true;
                         this.popupOpen = true;
                         this.popupClickGuardFrames = 2;
-                        this.SaveConfigurationIfDirty();
+                        this.QueueButtonPositionSave();
                     }
 
                     var moveHover = ImGui.IsItemHovered();
@@ -2240,7 +2218,7 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         ImGui.SetCursorScreenPos(cellMin);
         ImGui.Dummy(cellSize);
 
-        drawList.AddRectFilled(cellMin, cellMax, Color(this.PopupBg(hovered ? colors.CellHovered : colors.CellBackground)), 5f * scale);
+        drawList.AddRectFilled(cellMin, cellMax, Color(hovered ? colors.CellHovered : colors.CellBackground), 5f * scale);
 
         var textSize = ImGui.CalcTextSize(symbol);
         var textPos = cellMin + (cellSize - textSize) * 0.5f;
@@ -2858,17 +2836,32 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         this.SaveConfig();
     }
 
-    private void SaveConfigurationIfDirty()
+    private void QueueButtonPositionSave()
     {
         if (!this.bPositionDirty)
         {
             return;
         }
 
+        // Keep the compatibility fields in sync immediately, but leave the actual file write queued.
+        // Dragging can update this every frame, and writing right here can hit Dalamud config storage too often.
         this.Config.HasCustomButtonPosition = this.Config.HasCustombPosition;
         this.Config.ButtonPosition = this.Config.bPosition;
-        this.SaveConfig();
+        this.bPositionSaveQueued = true;
+    }
+
+    private void FlushButtonPositionSave()
+    {
+        if (!this.bPositionSaveQueued || this.draggingButton)
+        {
+            return;
+        }
+
+        // The queued write is flushed from FrameworkUpdate so config saves stay limited to the normal frame loop.
+        // Waiting until dragging ends also avoids saving a new file for every tiny mouse movement.
+        this.bPositionSaveQueued = false;
         this.bPositionDirty = false;
+        this.SaveConfig();
     }
 
     private static Vector2 GetNodeScreenSize(AtkResNode* node, float scale)
