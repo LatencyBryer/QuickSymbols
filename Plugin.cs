@@ -29,6 +29,10 @@ namespace QuickSymbols;
 public sealed unsafe partial class Plugin : IDalamudPlugin
 {
     private const string ChatLogAddonName = "ChatLog";
+    private const int ButtonPlacementLeft = 0;
+    private const int ButtonPlacementRight = 1;
+    private const int ButtonPlacementKeybindOnly = 2;
+    private static readonly string[] ButtonPlacementLabels = ["Left of Chat", "Right of Chat", "Keybind Only"];
     private static readonly string[] RecruitmentCriteriaAddonNames =
     [
         "LookingForGroupCondition",
@@ -107,6 +111,15 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         public Vector2 bPosition { get; set; }
         public Vector2 ButtonOffset { get; set; }
         public bool ClosePopupOnLostFocus { get; set; }
+
+        // Main chat button placement. This is kept as a int so old configs still load safely if this list changes later.
+        public int ButtonPlacement { get; set; } = ButtonPlacementRight;
+
+        // Users can enable this so the list uses Dalamud style instead of FFXIV theme.
+        public bool UseDalamudTheme { get; set; }
+
+        // Stored outside the theme colors so the chosen opacity stays the same when the user changes themes.
+        public float BackgroundOpacity { get; set; } = 0.6f;
         public bool ConfigWindowHadFirstOpen { get; set; }
     }
 
@@ -220,6 +233,7 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         this.Config.favsymbols ??= [];
         this.Config.History ??= [];
         this.Config.ToggleHotkey = NormalizeHotkey(this.Config.ToggleHotkey ?? [VirtualKey.MENU, VirtualKey.S]);
+        this.Config.BackgroundOpacity = NormalizeOpacity(this.Config.BackgroundOpacity);
 
         if (this.Config.favsymbols.Count == 0 && this.Config.FavoriteSymbols.Count > 0)
         {
@@ -240,6 +254,20 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
             this.Config.HasCustomButtonPosition = true;
             this.Config.ButtonPosition = this.Config.bPosition;
         }
+    }
+
+    private static float NormalizeOpacity(float opacity)
+    {
+        return float.IsNaN(opacity) || float.IsInfinity(opacity)
+            ? 1f
+            : Math.Clamp(opacity, 0f, 1f);
+    }
+
+    private Vector4 PopupBg(Vector4 color)
+    {
+        // Opacity only touches QuickSymbols popup surfaces. Text, icons, borders and other Dalamud windows stay untouched.
+        var alpha = NormalizeOpacity(this.Config.BackgroundOpacity);
+        return new Vector4(color.X, color.Y, color.Z, alpha);
     }
 
     public void Dispose()
@@ -731,13 +759,78 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
     }
 
 
+
+    private void SetButtonPlacement(int placement)
+    {
+        // Picking Left/Right will always go back to the native chat anchor.
+        // Manual dragging stores a custom offset, so both old and current position flags are cleared here.
+        this.Config.ButtonPlacement = Math.Clamp(placement, 0, ButtonPlacementLabels.Length - 1);
+        this.Config.HasCustombPosition = false;
+        this.Config.HasCustomButtonPosition = false;
+        this.Config.UsesRelativeButtonOffset = false;
+        this.Config.bPosition = Vector2.Zero;
+        this.Config.ButtonPosition = Vector2.Zero;
+        this.Config.ButtonOffset = Vector2.Zero;
+        this.bPositionDirty = false;
+        this.editbPosition = false;
+        this.draggingButton = false;
+    }
+
     private void DrawConfig(ref bool hasChanged)
     {
         this.ConfigChanged();
 
-        if (this.DrawHotkeyConfigEditor("Toggle Character Selector", this.Config.ToggleHotkey, out var newKeys))
+        if (this.DrawHotkeyConfigEditor("Open symbol list pressing:", this.Config.ToggleHotkey, out var newKeys))
         {
             this.Config.ToggleHotkey = newKeys;
+            hasChanged = true;
+        }
+
+        // Button position controls only the main chat heart button.
+        // Context buttons like PF/Message Book will still stay next to their own text inputs.
+        var buttonPlacement = Math.Clamp(this.Config.ButtonPlacement, 0, ButtonPlacementLabels.Length - 1);
+        ImGui.SetNextItemWidth(Math.Max(180f, ImGui.GetContentRegionAvail().X * 0.48f));
+        if (ImGui.BeginCombo("Button position", ButtonPlacementLabels[buttonPlacement]))
+        {
+            for (var i = 0; i < ButtonPlacementLabels.Length; i++)
+            {
+                var selected = buttonPlacement == i;
+                if (ImGui.Selectable(ButtonPlacementLabels[i], selected))
+                {
+                    this.SetButtonPlacement(i);
+                    hasChanged = true;
+                }
+
+                if (selected)
+                {
+                    ImGui.SetItemDefaultFocus();
+                }
+            }
+
+            ImGui.EndCombo();
+        }
+
+        // This only swaps the popup list to Dalamud style colors.
+        // Leaving it off keeps the current FFXIV/chat-theme look.
+        var useDalamudTheme = this.Config.UseDalamudTheme;
+        if (ImGui.Checkbox("Use Dalamud theme", ref useDalamudTheme))
+        {
+            this.Config.UseDalamudTheme = useDalamudTheme;
+            hasChanged = true;
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Use your Dalamud theme instead of FFXIV themes for the popup list.");
+        }
+
+        // This slider affects only the popup window background and symbol-cell backgrounds.
+        // Keeping it separate avoids pushing global ImGui alpha and accidentally touching other plugin windows.
+        var backgroundOpacity = NormalizeOpacity(this.Config.BackgroundOpacity) * 100f;
+        ImGui.SetNextItemWidth(Math.Max(180f, ImGui.GetContentRegionAvail().X * 0.48f));
+        if (ImGui.SliderFloat("Background opacity", ref backgroundOpacity, 0f, 100f, "%.0f%%"))
+        {
+            this.Config.BackgroundOpacity = NormalizeOpacity(backgroundOpacity / 100f);
             hasChanged = true;
         }
 
@@ -788,6 +881,7 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
                 }
 
                 ImGui.Separator();
+                ImGui.TextDisabled("Available in the \"Custom\" tab of the list popup");
                 ImGui.SetNextItemWidth(Math.Max(180f, ImGui.GetContentRegionAvail().X - 76f * ImGuiHelpers.GlobalScale));
                 ImGui.InputText("##newCustomEntry", ref this.newCustomEntry, 128);
                 ImGui.SameLine();
@@ -974,7 +1068,14 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
             this.currentbSize = nSize;
             this.currentbPos = this.GetCurrentbPosition(nPos, nSize);
 
-            if (this.keybindPopupOpen)
+            if (this.Config.ButtonPlacement == ButtonPlacementKeybindOnly)
+            {
+                // "Keybind Only" keeps the chat integration active but intentionally hides the heart button.
+                // The popup can still open from the keybind when a supported text input is focused.
+                this.popupOpen = false;
+                this.editbPosition = false;
+            }
+            else if (this.keybindPopupOpen)
             {
                 this.DrawHeartButtonGhost(this.currentbPos, nSize, colors, this.editbPosition);
             }
@@ -1184,6 +1285,11 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         var scale = Math.Clamp(chatUnit.Scale, 0.65f, 2.4f);
         var gap = Math.Max(2f, 2f * scale);
 
+        if (this.Config.ButtonPlacement == ButtonPlacementRight && this.TryGetRightChatButtonPlacement(chatLog, scale, gap, out bPos, out bSize))
+        {
+            return true;
+        }
+
         //Try to find the channel dropdown
         if (chatLog->ChannelSelectDropDown != null)
         {
@@ -1221,6 +1327,42 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         bPos = new Vector2(
             chatUnit.Position.X + 4f * scale,
             chatUnit.Position.Y + chatUnit.ScaledSize.Y - fSize - 4f * scale);
+        return true;
+    }
+
+
+    private bool TryGetRightChatButtonPlacement(AddonChatLog* chatLog, float scale, float gap, out Vector2 bPos, out Vector2 bSize)
+    {
+        bPos = Vector2.Zero;
+        bSize = Vector2.Zero;
+
+        // "Right of Chat" follows the native chat text input instead of the channel selector.
+        // This keeps the button near the message box and avoids the left-edge off-screen issue that commonly happens.
+        if (chatLog == null || chatLog->TextInput == null)
+        {
+            return false;
+        }
+
+        var node = chatLog->TextInput->AtkComponentInputBase.AtkComponentBase.OwnerNode;
+        if (node == null || !node->AtkResNode.IsVisible())
+        {
+            return false;
+        }
+
+        var res = &node->AtkResNode;
+        var size = GetNodeScreenSize(res, scale);
+        if (size.X <= 10f || size.Y <= 10f)
+        {
+            return false;
+        }
+
+        var sq = Math.Clamp(size.Y, 18f * scale, 28f * scale);
+        bSize = new Vector2(sq, sq);
+        bPos = new Vector2(
+            res->ScreenX + size.X + gap,
+            res->ScreenY + Math.Max(0f, (size.Y - sq) * 0.5f));
+
+        bPos = ClampPositionToScreen(bPos, bSize);
         return true;
     }
 
@@ -1402,6 +1544,13 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
     {
         this.ConfigChanged();
 
+        // Popup-only theme override. Buttons can still use the FFXIV chat look,
+        // while the list itself can follow the user Dalamud theme when requested.
+        if (this.Config.UseDalamudTheme)
+        {
+            colors = UiColors.FromDalamudStyle();
+        }
+
         var cEntries = this.GetcEntries();
         var scale = ImGuiHelpers.GlobalScale;
         var dSize = ImGui.GetIO().DisplaySize;
@@ -1468,7 +1617,7 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         using var pPadding = ImRaii.PushStyle(ImGuiStyleVar.WindowPadding, new Vector2(padding, padding));
         using var pBorderSize = ImRaii.PushStyle(ImGuiStyleVar.WindowBorderSize, 1f * scale);
         using var pRounding = ImRaii.PushStyle(ImGuiStyleVar.WindowRounding, 8f * scale);
-        using var pBackground = ImRaii.PushColor(ImGuiCol.WindowBg, colors.PopupBackground);
+        using var pBackground = ImRaii.PushColor(ImGuiCol.WindowBg, this.PopupBg(colors.PopupBackground));
         using var pBorder = ImRaii.PushColor(ImGuiCol.Border, colors.Border);
 
         try
@@ -1632,6 +1781,12 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
                     if (favsHeight > 0f)
                     {
                         ImGui.SetCursorScreenPos(new Vector2(wPos.X + padding, contentStartY + favsHeight));
+                    }
+                    else
+                    {
+                        var dividerHeight = this.DrawHomeDivider(gridWidth, colors, scale);
+                        ImGui.SetCursorScreenPos(new Vector2(wPos.X + padding, contentStartY + dividerHeight));
+                        favsHeight = dividerHeight;
                     }
 
                     var availableGridHeight = Math.Max(cell, contentHeight - favsHeight);
@@ -1923,6 +2078,22 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         return totalHeight;
     }
 
+    private float DrawHomeDivider(float gridWidth, UiColors colors, float scale)
+    {
+        var origin = ImGui.GetCursorScreenPos();
+        var dList = ImGui.GetWindowDrawList();
+        var height = 7f * scale;
+        var y = origin.Y + 3f * scale;
+
+        dList.AddLine(
+            new Vector2(origin.X, y),
+            new Vector2(origin.X + gridWidth, y),
+            Color(colors.CellBorder),
+            Math.Max(1f, scale));
+
+        return height;
+    }
+
     private void DrawEntriesGrid(
         string idSuffix,
         IReadOnlyList<string> entries,
@@ -2069,7 +2240,7 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         ImGui.SetCursorScreenPos(cellMin);
         ImGui.Dummy(cellSize);
 
-        drawList.AddRectFilled(cellMin, cellMax, Color(hovered ? colors.CellHovered : colors.CellBackground), 5f * scale);
+        drawList.AddRectFilled(cellMin, cellMax, Color(this.PopupBg(hovered ? colors.CellHovered : colors.CellBackground)), 5f * scale);
 
         var textSize = ImGui.CalcTextSize(symbol);
         var textPos = cellMin + (cellSize - textSize) * 0.5f;
@@ -3085,6 +3256,33 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         public Vector4 MutedText { get; }
         public Vector4 ScrollTrack { get; }
         public Vector4 ScrollThumb { get; }
+
+        public static UiColors FromDalamudStyle()
+        {
+            var style = ImGui.GetStyle();
+            var text = style.Colors[(int)ImGuiCol.Text];
+            var muted = style.Colors[(int)ImGuiCol.TextDisabled];
+            var popup = style.Colors[(int)ImGuiCol.PopupBg];
+            var button = style.Colors[(int)ImGuiCol.Button];
+            var border = style.Colors[(int)ImGuiCol.Border];
+
+            return new UiColors(
+                PopupBackground: popup,
+                Button: button,
+                ButtonHovered: style.Colors[(int)ImGuiCol.ButtonHovered],
+                ButtonActive: style.Colors[(int)ImGuiCol.ButtonActive],
+                EditButton: style.Colors[(int)ImGuiCol.Button],
+                EditButtonHovered: style.Colors[(int)ImGuiCol.ButtonHovered],
+                Border: border,
+                CellBackground: style.Colors[(int)ImGuiCol.FrameBg],
+                CellHovered: style.Colors[(int)ImGuiCol.FrameBgHovered],
+                CellBorder: border,
+                Text: text,
+                SymbolText: text,
+                MutedText: muted,
+                ScrollTrack: style.Colors[(int)ImGuiCol.ScrollbarBg],
+                ScrollThumb: style.Colors[(int)ImGuiCol.ScrollbarGrab]);
+        }
 
         public static UiColors FromGameTheme(GameUiTheme theme, AddonChatLog* chatLog)
         {
