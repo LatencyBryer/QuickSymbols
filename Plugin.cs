@@ -26,9 +26,15 @@ namespace QuickSymbols;
 // this project as a Tweak integration for SimpleTweaks, wich was not approved.
 // So I rebuild it as a actual plugin again instead.
 
+// QuickSymbols work with any native window with textinput but it show the plugin button
+// for some windows to make it easier to use without keybind.
+
 public sealed unsafe partial class Plugin : IDalamudPlugin
 {
     private const string ChatLogAddonName = "ChatLog";
+    // Macro is the game's User Macros window, while TofuInputString is the textinput from StrategyBoard
+    private const string MacroAddonName = "Macro";
+    private const string TofuInputStringAddonName = "TofuInputString";
     private const int ButtonPlacementLeft = 0;
     private const int ButtonPlacementRight = 1;
     private const int ButtonPlacementKeybindOnly = 2;
@@ -148,11 +154,17 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
     private Vector2 currentbSize;
     // #
 
-    // Party Finder/House Message Book
+    // Party Finder/House Message Book/User Macros
     private Vector2 partyFinderbPos;
     private Vector2 partyFinderbSize;
     private Vector2 messageBookbPos;
     private Vector2 messageBookbSize;
+    private Vector2 macrobPos;
+    private Vector2 macrobSize;
+    private bool macroPopupOpen;
+    private Vector2 tofuInputbPos;
+    private Vector2 tofuInputbSize;
+    private bool tofuInputPopupOpen;
     // #
 
     // New Keybind Popup | Kept 'Toggle Character Selector' option from original 'QuickSymbols'
@@ -193,6 +205,11 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
     private bool draggingScrollBar;
     private float scrollDragOffsetY;
     private bool configWindowOpen;
+    // Track its popup anchor ourselves so the picker can open from the keybind inside the config window.
+    private bool configCustomEntryPopupOpen;
+    private Vector2 configCustomEntryPopupAnchorPos;
+    private Vector2 configCustomEntryPopupAnchorSize;
+    private bool configCustomEntryActive;
     private bool hotkeyRecording;
     private bool hotkeyWasDown;
     private int hotkeyCaptureDelayFrames;
@@ -360,6 +377,22 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
 
         ImGui.End();
 
+        if (this.configCustomEntryPopupOpen)
+        {
+            // Draw this from the config window path instead of the normal game overlay path.
+            // The config input lives in this ImGui window, so keeping the picker here avoids losing the anchor.
+            var colors = UiColors.FromGameTheme(GetCurrentGameUiTheme(), null);
+            this.DrawSymbolsPopup(
+                "ConfigCustomEntry",
+                colors,
+                this.configCustomEntryPopupAnchorPos,
+                this.configCustomEntryPopupAnchorSize,
+                PopupPlacement.Below,
+                includePositionEditor: false,
+                SymbolInsertTarget.ConfigCustomEntry,
+                ref this.configCustomEntryPopupOpen);
+        }
+
         if (changed)
         {
             this.SaveConfig();
@@ -384,6 +417,50 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         foreach (var key in keys)
         {
             if (!KeyState[key])
+            {
+                this.hotkeyWasDown = false;
+                return false;
+            }
+        }
+
+        if (this.hotkeyWasDown)
+        {
+            return false;
+        }
+
+        this.hotkeyWasDown = true;
+        foreach (var key in keys)
+        {
+            KeyState[key] = false;
+        }
+
+        return true;
+    }
+
+    private bool CheckHotkeyStateRaw(VirtualKey[] keys)
+    {
+        // Use the OS key state for ImGui-owned fields where Dalamud's text-input focus helper cannot help.
+        // Keep the same hotkeyWasDown guard so holding the combo does not spam-open the picker.
+        this.CheckHotkeyEditorSafety();
+        if (this.hotkeyRecording || keys.Length == 0)
+        {
+            this.hotkeyWasDown = false;
+            return false;
+        }
+
+        foreach (var key in keys)
+        {
+            var down = false;
+            try
+            {
+                down = (GetAsyncKeyState((int)key) & unchecked((short)0x8000)) != 0;
+            }
+            catch
+            {
+                down = KeyState[key];
+            }
+
+            if (!down)
             {
                 this.hotkeyWasDown = false;
                 return false;
@@ -860,6 +937,57 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
                 ImGui.TextDisabled("Available in the \"Custom\" tab of the list popup");
                 ImGui.SetNextItemWidth(Math.Max(180f, ImGui.GetContentRegionAvail().X - 76f * ImGuiHelpers.GlobalScale));
                 ImGui.InputText("##newCustomEntry", ref this.newCustomEntry, 128);
+                var newEntryPos = ImGui.GetItemRectMin();
+                var newEntrySize = ImGui.GetItemRectSize();
+                this.configCustomEntryActive = ImGui.IsItemActive();
+
+                // Save the exact ImGui input rect while it is alive.
+                // The popup uses this as a fake button anchor, since there is no native addon node here.
+                if (this.configCustomEntryActive)
+                {
+                    this.configCustomEntryPopupAnchorPos = newEntryPos;
+                    this.configCustomEntryPopupAnchorSize = newEntrySize;
+                }
+
+                if (ImGui.IsItemHovered())
+                {
+                    ImGui.SetTooltip("Open the symbol list through keybind to insert here");
+                }
+
+                // Once the popup gets clicked, ImGui focus can leave the input and hide the real caret.
+                // Draw a tiny local caret at the end of the text instead of forcing focus and selecting everything.
+                if (this.configCustomEntryPopupOpen && !this.configCustomEntryActive)
+                {
+                    var style = ImGui.GetStyle();
+                    var drawList = ImGui.GetWindowDrawList();
+                    var textSize = ImGui.CalcTextSize(this.newCustomEntry);
+                    var caretX = Math.Min(
+                        newEntryPos.X + newEntrySize.X - style.FramePadding.X,
+                        newEntryPos.X + style.FramePadding.X + textSize.X + 1f * ImGuiHelpers.GlobalScale);
+                    var caretTop = newEntryPos.Y + 4f * ImGuiHelpers.GlobalScale;
+                    var caretBottom = newEntryPos.Y + newEntrySize.Y - 4f * ImGuiHelpers.GlobalScale;
+
+                    if ((ImGui.GetTime() % 1.0) < 0.55)
+                    {
+                        drawList.AddLine(
+                            new Vector2(caretX, caretTop),
+                            new Vector2(caretX, caretBottom),
+                            ImGui.GetColorU32(ImGui.GetStyle().Colors[(int)ImGuiCol.Text]),
+                            Math.Max(1f, ImGuiHelpers.GlobalScale));
+                    }
+                }
+
+                if (this.configCustomEntryActive)
+                {
+                    // Raw key state is used here because this field is an ImGui input owned by the config window.
+                    if (this.CheckHotkeyStateRaw(this.Config.ToggleHotkey))
+                    {
+                        this.configCustomEntryPopupOpen = !this.configCustomEntryPopupOpen;
+                        this.selectedPopupTab = PopupTab.Symbols;
+                        this.popupClickGuardFrames = 2;
+                    }
+                }
+
                 ImGui.SameLine();
                 if (ImGui.SmallButton("+ Add##addCustomEntry"))
                 {
@@ -878,6 +1006,11 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
     private void FrameworkUpdate(IFramework framework)
     {
         this.FlushButtonPositionSave();
+
+        if (this.TryOpenConfigCustomEntryPopup())
+        {
+            return;
+        }
 
         if (this.hotkeyRecording)
         {
@@ -899,6 +1032,33 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         }
 
         this.TryOpenKeybindPopupFromCurrentFocus();
+    }
+
+    private bool TryOpenConfigCustomEntryPopup()
+    {
+        // Also check from FrameworkUpdate so the config field can react even when draw timing misses the key edge.
+        // This is just for the Quick Symbols config input; normal game inputs still use their own path below.
+        if (!this.configWindowOpen || !this.configCustomEntryActive)
+        {
+            return false;
+        }
+
+        if (!this.CheckHotkeyStateRaw(this.Config.ToggleHotkey))
+        {
+            return false;
+        }
+
+        if (this.configCustomEntryPopupOpen)
+        {
+            this.configCustomEntryPopupOpen = false;
+            return true;
+        }
+
+        this.CloseAllPopups(clearKeybindTarget: true);
+        this.configCustomEntryPopupOpen = true;
+        this.selectedPopupTab = PopupTab.Symbols;
+        this.popupClickGuardFrames = 2;
+        return true;
     }
 
     private bool TryOpenKeybindPopupFromCurrentFocus()
@@ -1038,6 +1198,8 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         var ChatPopup = false;
         var PartyFinderPopup = false;
         var MsgBookPopup = false;
+        var MacroPopup = false;
+        var TofuInputPopup = false;
 
         // Chat Log button
         if (this.TryGetNativeChatButtonPlacement(out var nPos, out var nSize, out colors))
@@ -1073,9 +1235,9 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         if (this.TryGetRecruitmentCommentTarget(out var pfTarget))
         {
             var scale = ImGuiHelpers.GlobalScale;
-            var refSide = this.currentbSize.Y > 0.1f ? this.currentbSize.Y : 24f * scale;
-            var Side = Math.Clamp(Math.Min(refSide, pfTarget.Size.Y * 0.50f), 18f * scale, 28f * scale);
-            this.partyFinderbSize = new Vector2(Side, Side);
+            this.partyFinderbSize = this.currentbSize.X > 0.1f && this.currentbSize.Y > 0.1f
+                ? this.currentbSize
+                : new Vector2(Math.Clamp(24f * scale, 18f * scale, 28f * scale));
             this.partyFinderbPos = ClampPositionToScreen(
                 new Vector2(pfTarget.Position.X + 6f * scale, pfTarget.Position.Y + pfTarget.Size.Y + 2f * scale),
                 this.partyFinderbSize);
@@ -1097,9 +1259,9 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         if (this.TryGetMessageBookInputTarget(out var messageTarget))
         {
             var scale = ImGuiHelpers.GlobalScale;
-            var refSide = this.currentbSize.Y > 0.1f ? this.currentbSize.Y : 24f * scale;
-            var Side = Math.Clamp(Math.Min(refSide, messageTarget.Size.Y * 0.58f), 18f * scale, 28f * scale);
-            this.messageBookbSize = new Vector2(Side, Side);
+            this.messageBookbSize = this.currentbSize.X > 0.1f && this.currentbSize.Y > 0.1f
+                ? this.currentbSize
+                : new Vector2(Math.Clamp(24f * scale, 18f * scale, 28f * scale));
             this.messageBookbPos = ClampPositionToScreen(
                 new Vector2(messageTarget.Position.X + 6f * scale, messageTarget.Position.Y + messageTarget.Size.Y + 3f * scale),
                 this.messageBookbSize);
@@ -1116,6 +1278,56 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         else
         {
             this.messageBookPopupOpen = false;
+        }
+        // User Macros button
+        // Place the picker button under the big macro body input, not the macro name field.
+        if (this.TryGetMacroInputTarget(out var macroTarget))
+        {
+            var scale = ImGuiHelpers.GlobalScale;
+            this.macrobSize = this.currentbSize.X > 0.1f && this.currentbSize.Y > 0.1f
+                ? this.currentbSize
+                : new Vector2(Math.Clamp(24f * scale, 18f * scale, 28f * scale));
+            this.macrobPos = ClampPositionToScreen(
+                new Vector2(macroTarget.Position.X + 6f * scale, macroTarget.Position.Y + macroTarget.Size.Y + 3f * scale),
+                this.macrobSize);
+
+            this.DrawContextButton(
+                "##QuickSymbolsMacroButtonOverlay",
+                "##QuickSymbolsMacroOpenButton",
+                this.macrobPos,
+                this.macrobSize,
+                colors,
+                ref this.macroPopupOpen);
+            MacroPopup = this.macroPopupOpen;
+        }
+        else
+        {
+            this.macroPopupOpen = false;
+        }
+        // Strategy Board button
+        // TofuInputString is a generic prompt addon, so anchor to its detected text field instead of hard-coding a screen position.
+        if (this.TryGetTofuInputStringTarget(out var tofuTarget))
+        {
+            var scale = ImGuiHelpers.GlobalScale;
+            this.tofuInputbSize = this.currentbSize.X > 0.1f && this.currentbSize.Y > 0.1f
+                ? this.currentbSize
+                : new Vector2(Math.Clamp(24f * scale, 18f * scale, 28f * scale));
+            this.tofuInputbPos = ClampPositionToScreen(
+                new Vector2(tofuTarget.Position.X + 6f * scale, tofuTarget.Position.Y + tofuTarget.Size.Y + 3f * scale),
+                this.tofuInputbSize);
+
+            this.DrawContextButton(
+                "##QuickSymbolsTofuInputButtonOverlay",
+                "##QuickSymbolsTofuInputOpenButton",
+                this.tofuInputbPos,
+                this.tofuInputbSize,
+                colors,
+                ref this.tofuInputPopupOpen);
+            TofuInputPopup = this.tofuInputPopupOpen;
+        }
+        else
+        {
+            this.tofuInputPopupOpen = false;
         }
         // Popup Rendering
         if (ChatPopup)
@@ -1145,6 +1357,24 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
                 colors,
                 this.messageBookbPos,
                 this.messageBookbSize, PopupPlacement.Below, includePositionEditor: false, SymbolInsertTarget.MessageBookInput, ref this.messageBookPopupOpen);
+        }
+
+        if (MacroPopup)
+        {
+            this.DrawSymbolsPopup(
+                "Macro",
+                colors,
+                this.macrobPos,
+                this.macrobSize, PopupPlacement.Below, includePositionEditor: false, SymbolInsertTarget.MacroInput, ref this.macroPopupOpen);
+        }
+
+        if (TofuInputPopup)
+        {
+            this.DrawSymbolsPopup(
+                "TofuInputString",
+                colors,
+                this.tofuInputbPos,
+                this.tofuInputbSize, PopupPlacement.Below, includePositionEditor: false, SymbolInsertTarget.TofuInputString, ref this.tofuInputPopupOpen);
         }
 
         if (this.keybindPopupOpen)
@@ -1199,6 +1429,8 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         this.popupOpen = false;
         this.partyFinderPopupOpen = false;
         this.messageBookPopupOpen = false;
+        this.macroPopupOpen = false;
+        this.tofuInputPopupOpen = false;
         this.keybindPopupOpen = false;
         this.ipcPopupOpen = false;
         this.ipcPopupOwner = null;
@@ -1345,34 +1577,34 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
     }
 
 
+    private static void DrawHeartIcon(ImDrawListPtr drawList, Vector2 min, Vector2 size, Vector4 color)
+    {
+        // Use the FontAwesome heart instead of the text glyph so the shape centers properly.
+        // The tiny upward nudge is the optical fix that made the ChatLog button look centered in-game.
+        using var iconFont = PushQuickSymbolsIconFont();
+        var text = char.ConvertFromUtf32(0xF004);
+        var font = ImGui.GetFont();
+        var fontSize = ImGui.GetFontSize() * 0.82f;
+        var textSize = ImGui.CalcTextSize(text) * 0.82f;
+        var pos = min + (size - textSize) * 0.5f + new Vector2(0f, -1f);
+        drawList.AddText(font, fontSize, new Vector2(MathF.Round(pos.X), MathF.Round(pos.Y)), Color(color), text);
+    }
+
     private void DrawHeartButtonGhost(Vector2 position, Vector2 size, UiColors colors, bool editing)
     {
+        // Ghost uses the same pixel trims as the clickable button so edit mode does not jump visually.
         var drawList = ImGui.GetBackgroundDrawList();
         var min = position;
-        var max = position + size;
+        var iconSize = new Vector2(Math.Max(1f, size.X - 1f), size.Y);
+        var buttonSize = new Vector2(iconSize.X, Math.Max(1f, size.Y - 1f));
+        var buttonMin = min + new Vector2(0f, 1f);
+        var buttonMax = min + buttonSize;
         var background = editing ? colors.EditButton : colors.Button;
         var rounding = Math.Max(2f, size.Y * 0.14f);
 
-        drawList.AddRectFilled(min, max, Color(background), rounding);
-        drawList.AddRect(min, max, Color(colors.Border), rounding, ImDrawFlags.None, Math.Max(1f, size.Y * 0.045f));
-
-        IDisposable? pushedFont = null;
-        try
-        {
-            if (this.symbolFont is { Available: true })
-            {
-                pushedFont = this.symbolFont.Push();
-            }
-
-            const string text = "♥";
-            var textSize = ImGui.CalcTextSize(text);
-            var textPos = min + (size - textSize) * 0.5f;
-            drawList.AddText(textPos, Color(colors.Text), text);
-        }
-        finally
-        {
-            pushedFont?.Dispose();
-        }
+        drawList.AddRectFilled(buttonMin, buttonMax, Color(background), rounding);
+        drawList.AddRect(buttonMin, buttonMax, Color(colors.Border), rounding, ImDrawFlags.None, Math.Max(1f, size.Y * 0.045f));
+        DrawHeartIcon(drawList, min, iconSize, colors.Text);
     }
 
     private void DrawChatButton(Vector2 position, Vector2 size, UiColors colors)
@@ -1397,7 +1629,23 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
 
     private void DrawContextButton(string windowId, string buttonId, Vector2 position, Vector2 size, UiColors colors, ref bool isOpen)
     {
-        if (this.DrawHeartButtonOverlay(windowId, buttonId, position, size, colors, editing: false, out _))
+        // Context buttons borrow the current ChatLog sizing/colors when available.
+        // Keep the +1px icon offset here because PF/House/extra prompt buttons sit slightly different than the chat button.
+        var cloneSize = size;
+        var cloneColors = colors;
+
+        if (this.TryGetNativeChatButtonPlacement(out _, out var chatSize, out var chatColors))
+        {
+            cloneSize = chatSize;
+            cloneColors = chatColors;
+        }
+
+        var clicked = this.DrawHeartButtonOverlay(
+            windowId,
+            buttonId, position, cloneSize, cloneColors,
+            editing: false, out _, iconYOffset: 1f);
+
+        if (clicked)
         {
             if (isOpen)
                 this.CloseAllPopups(clearKeybindTarget: true);
@@ -1406,7 +1654,7 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         }
     }
 
-    private bool DrawHeartButtonOverlay(string windowId, string buttonId, Vector2 position, Vector2 size, UiColors colors, bool editing, out bool active)
+    private bool DrawHeartButtonOverlay(string windowId, string buttonId, Vector2 position, Vector2 size, UiColors colors, bool editing, out bool active, float iconYOffset = 0f)
     {
         var hovered = false;
         var clicked = false;
@@ -1441,7 +1689,13 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
 
                 var drawList = ImGui.GetWindowDrawList();
                 var min = position;
-                var max = position + size;
+
+                // Trim only the drawn rectangle, not the hitbox, so the button keeps the same clickable area.
+                // The heart still uses the matching icon box plus optional per-context Y offset.
+                var iconSize = new Vector2(Math.Max(1f, size.X - 1f), size.Y);
+                var buttonSize = new Vector2(iconSize.X, Math.Max(1f, size.Y - 1f));
+                var buttonMin = min + new Vector2(0f, 1f);
+                var buttonMax = min + buttonSize;
                 var background = editing
                     ? colors.EditButton
                     : active
@@ -1449,30 +1703,14 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
                         : colors.Button;
 
                 var rounding = Math.Max(2f, size.Y * 0.14f);
-                drawList.AddRectFilled(min, max, Color(background), rounding);
-                drawList.AddRect(min, max, Color(colors.Border), rounding, ImDrawFlags.None, Math.Max(1f, size.Y * 0.045f));
+                drawList.AddRectFilled(buttonMin, buttonMax, Color(background), rounding);
+                drawList.AddRect(buttonMin, buttonMax, Color(colors.Border), rounding, ImDrawFlags.None, Math.Max(1f, size.Y * 0.045f));
 
-                IDisposable? pushedFont = null;
-                try
-                {
-                    if (this.symbolFont is { Available: true })
-                    {
-                        pushedFont = this.symbolFont.Push();
-                    }
+                var textColor = hovered && !editing
+                    ? new Vector4(1f, 0.08f, 0.08f, 1f)
+                    : colors.Text;
 
-                    var text = "♥";
-                    var textSize = ImGui.CalcTextSize(text);
-                    var textPos = min + (size - textSize) * 0.5f;
-                    var textColor = hovered && !editing
-                        ? new Vector4(1f, 0.08f, 0.08f, 1f)
-                        : colors.Text;
-
-                    drawList.AddText(textPos, Color(textColor), text);
-                }
-                finally
-                {
-                    pushedFont?.Dispose();
-                }
+                DrawHeartIcon(drawList, min + new Vector2(0f, iconYOffset), iconSize, textColor);
 
                 if (hovered)
                 {
@@ -1778,8 +2016,10 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
                     var insideMainButton = this.popupOpen && mouse.X >= this.currentbPos.X && mouse.X <= this.currentbPos.X + this.currentbSize.X && mouse.Y >= this.currentbPos.Y && mouse.Y <= this.currentbPos.Y + this.currentbSize.Y;
                     var insidePfButton = this.partyFinderPopupOpen && mouse.X >= this.partyFinderbPos.X && mouse.X <= this.partyFinderbPos.X + this.partyFinderbSize.X && mouse.Y >= this.partyFinderbPos.Y && mouse.Y <= this.partyFinderbPos.Y + this.partyFinderbSize.Y;
                     var insideMsgButton = this.messageBookPopupOpen && mouse.X >= this.messageBookbPos.X && mouse.X <= this.messageBookbPos.X + this.messageBookbSize.X && mouse.Y >= this.messageBookbPos.Y && mouse.Y <= this.messageBookbPos.Y + this.messageBookbSize.Y;
+                    var insideMacroButton = this.macroPopupOpen && mouse.X >= this.macrobPos.X && mouse.X <= this.macrobPos.X + this.macrobSize.X && mouse.Y >= this.macrobPos.Y && mouse.Y <= this.macrobPos.Y + this.macrobSize.Y;
+                    var insideTofuInputButton = this.tofuInputPopupOpen && mouse.X >= this.tofuInputbPos.X && mouse.X <= this.tofuInputbPos.X + this.tofuInputbSize.X && mouse.Y >= this.tofuInputbPos.Y && mouse.Y <= this.tofuInputbPos.Y + this.tofuInputbSize.Y;
                     var insideIpcAnchor = this.ipcPopupOpen && mouse.X >= this.ipcPopupAnchorPos.X && mouse.X <= this.ipcPopupAnchorPos.X + this.ipcPopupAnchorSize.X && mouse.Y >= this.ipcPopupAnchorPos.Y && mouse.Y <= this.ipcPopupAnchorPos.Y + this.ipcPopupAnchorSize.Y;
-                    if (!insidePopup && !insideMainButton && !insidePfButton && !insideMsgButton && !insideIpcAnchor)
+                    if (!insidePopup && !insideMainButton && !insidePfButton && !insideMsgButton && !insideMacroButton && !insideTofuInputButton && !insideIpcAnchor)
                     {
                         isOpen = false;
                         if (idSuffix == "Keybind")
@@ -2275,6 +2515,27 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
             return;
         }
 
+        if (insertTarget == SymbolInsertTarget.MacroInput)
+        {
+            // Native macro input needs its own path so insertion goes into the macro body field.
+            this.InsertTextIntoMacro(symbol);
+            return;
+        }
+
+        if (insertTarget == SymbolInsertTarget.TofuInputString)
+        {
+            // Generic Tofu prompt input uses the same native insertion flow as other game text fields.
+            this.InsertTextIntoTofuInputString(symbol);
+            return;
+        }
+
+        if (insertTarget == SymbolInsertTarget.ConfigCustomEntry)
+        {
+            // Config custom entry is just a string field, so append directly instead of sending native input.
+            this.InsertTextIntoConfigCustomEntry(symbol);
+            return;
+        }
+
         if (insertTarget == SymbolInsertTarget.IpcCallback)
         {
             this.SendSymbolToIpcOwner(symbol);
@@ -2282,6 +2543,11 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         }
 
         _ = Framework.RunOnTick(() => this.InsertTextIntoChat(symbol), delayTicks: 2);
+    }
+
+    private void InsertTextIntoConfigCustomEntry(string text)
+    {
+        this.newCustomEntry += text;
     }
 
     private void AdvanceCaretOnNextTick(Action<int> advanceCaret, string insertedText)
@@ -2489,7 +2755,101 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         }
     }
 
-    // Addons (PF/Guestbook) searching logic
+    private void InsertTextIntoMacro(string text)
+    {
+        // Re-find the macro input before inserting so stale addon pointers are not reused after the window refreshes.
+        try
+        {
+            if (!this.TryGetMacroInputTarget(out var target) || target.Input == null || target.Addon == null || target.Node == null)
+            {
+                return;
+            }
+
+            if (!target.Input->IsActive)
+            {
+                return;
+            }
+
+            target.Input->InsertText(text, false);
+
+            this.AdvanceCaretOnNextTick(this.AdvanceMacroCaretRightIfStillActive, text);
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Failed to insert QuickSymbols text into the User Macros input.");
+        }
+    }
+
+    private void AdvanceMacroCaretRightIfStillActive(int caretMoves)
+    {
+        try
+        {
+            if (!this.TryGetMacroInputTarget(out var target) || target.Input == null)
+            {
+                return;
+            }
+
+            if (!target.Input->IsActive)
+            {
+                return;
+            }
+
+            SendRightArrowKeyPress(caretMoves);
+        }
+        catch (Exception ex)
+        {
+            Log.Debug($"Failed to advance QuickSymbols User Macros caret after insertion. {ex}");
+        }
+    }
+
+    private void InsertTextIntoTofuInputString(string text)
+    {
+        // Re-find the Tofu input each time because this prompt is short-lived and can be recreated often.
+        try
+        {
+            if (!this.TryGetTofuInputStringTarget(out var target) || target.Input == null || target.Addon == null || target.Node == null)
+            {
+                return;
+            }
+
+            if (!target.Input->IsActive)
+            {
+                return;
+            }
+
+            target.Input->InsertText(text, false);
+
+            this.AdvanceCaretOnNextTick(this.AdvanceTofuInputStringCaretRightIfStillActive, text);
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Failed to insert QuickSymbols text into the TofuInputString input.");
+        }
+    }
+
+    private void AdvanceTofuInputStringCaretRightIfStillActive(int caretMoves)
+    {
+        try
+        {
+            if (!this.TryGetTofuInputStringTarget(out var target) || target.Input == null)
+            {
+                return;
+            }
+
+            if (!target.Input->IsActive)
+            {
+                return;
+            }
+
+            SendRightArrowKeyPress(caretMoves);
+        }
+        catch (Exception ex)
+        {
+            Log.Debug($"Failed to advance QuickSymbols TofuInputString caret after insertion. {ex}");
+        }
+    }
+
+    // Addons (PF/Guestbook/User Macros/TofuInputString) searching logic
     private bool TryGetRecruitmentCommentTarget(out TextInputTarget target)
     {
         target = default;
@@ -2565,6 +2925,72 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         return false;
     }
 
+    private bool TryGetMacroInputTarget(out TextInputTarget target)
+    {
+        // Macro has multiple inputs, so collect every text input and then pick the large body box.
+        target = default;
+
+        var addonPtr = GameGui.GetAddonByName(MacroAddonName);
+        if (addonPtr.IsNull)
+        {
+            return false;
+        }
+
+        var addon = (AtkUnitBase*)addonPtr.Address;
+        if (addon == null || !addon->IsReady || !addon->IsVisible || addon->RootNode == null)
+        {
+            return false;
+        }
+
+        var scale = Math.Clamp(addon->Scale, 0.65f, 2.4f);
+        var candidates = new List<TextInputTarget>();
+
+        CollectTextInputTargetsFromNodeList(addon, scale, candidates);
+        CollectTextInputTargetsFromTree(addon, addon->RootNode, scale, candidates, 0);
+
+        var best = PickBestMacroInputCandidate(candidates, scale);
+        if (best.Input == null)
+        {
+            return false;
+        }
+
+        target = best;
+        return true;
+    }
+
+    private bool TryGetTofuInputStringTarget(out TextInputTarget target)
+    {
+        // Prefer NodeID 2 when available but keep a size fallback for minor addon layout changes.
+        target = default;
+
+        var addonPtr = GameGui.GetAddonByName(TofuInputStringAddonName);
+        if (addonPtr.IsNull)
+        {
+            return false;
+        }
+
+        var addon = (AtkUnitBase*)addonPtr.Address;
+        if (addon == null || !addon->IsReady || !addon->IsVisible || addon->RootNode == null)
+        {
+            return false;
+        }
+
+        var scale = Math.Clamp(addon->Scale, 0.65f, 2.4f);
+        var candidates = new List<TextInputTarget>();
+
+        CollectTextInputTargetsFromNodeList(addon, scale, candidates);
+        CollectTextInputTargetsFromTree(addon, addon->RootNode, scale, candidates, 0);
+
+        var best = PickBestTofuInputStringCandidate(candidates, scale);
+        if (best.Input == null)
+        {
+            return false;
+        }
+
+        target = best;
+        return true;
+    }
+
     private static TextInputTarget PickBestRecruitmentCommentCandidate(List<TextInputTarget> candidates, float addonScale)
     {
         if (candidates.Count == 0)
@@ -2605,6 +3031,66 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
             .Where(candidate => candidate.Size.X >= minimumWidth && candidate.Size.Y >= minimumHeight)
             .OrderByDescending(candidate => candidate.Size.X)
             .ThenByDescending(candidate => candidate.Size.Y)
+            .FirstOrDefault();
+
+        if (best.Input != null)
+        {
+            return best;
+        }
+
+        return candidates
+            .OrderByDescending(candidate => candidate.Size.X * candidate.Size.Y)
+            .FirstOrDefault();
+    }
+
+    private static TextInputTarget PickBestMacroInputCandidate(List<TextInputTarget> candidates, float addonScale)
+    {
+        // The macro body is the biggest multiline text area, so area sorting is the safest match here.
+        if (candidates.Count == 0)
+        {
+            return default;
+        }
+
+        var minimumWidth = 180f * addonScale;
+        var minimumHeight = 120f * addonScale;
+
+        var best = candidates
+            .Where(candidate => candidate.Size.X >= minimumWidth && candidate.Size.Y >= minimumHeight)
+            .OrderByDescending(candidate => candidate.Size.X * candidate.Size.Y)
+            .FirstOrDefault();
+
+        if (best.Input != null)
+        {
+            return best;
+        }
+
+        return candidates
+            .OrderByDescending(candidate => candidate.Size.X * candidate.Size.Y)
+            .FirstOrDefault();
+    }
+
+    private static TextInputTarget PickBestTofuInputStringCandidate(List<TextInputTarget> candidates, float addonScale)
+    {
+        // NodeID 2 is the known Tofu input; fallback keeps the button working if the node id shifts later.
+        if (candidates.Count == 0)
+        {
+            return default;
+        }
+
+        var best = candidates
+            .FirstOrDefault(candidate => candidate.Node != null && candidate.Node->NodeId == 2);
+
+        if (best.Input != null)
+        {
+            return best;
+        }
+
+        var minimumWidth = 120f * addonScale;
+        var minimumHeight = 20f * addonScale;
+
+        best = candidates
+            .Where(candidate => candidate.Size.X >= minimumWidth && candidate.Size.Y >= minimumHeight)
+            .OrderByDescending(candidate => candidate.Size.X * candidate.Size.Y)
             .FirstOrDefault();
 
         if (best.Input != null)
@@ -3064,7 +3550,7 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
     // Popup tabs | Must match the tab routing in DrawSymbolsPopup and the visual order in DrawPopupTabs.
     private enum PopupTab { Symbols, Numbers, Letters, Common, Others, Time, Custom }
 
-    private enum SymbolInsertTarget { Chat, RecruitmentComment, MessageBookInput, FocusedTextInput, IpcCallback }
+    private enum SymbolInsertTarget { Chat, RecruitmentComment, MessageBookInput, MacroInput, TofuInputString, ConfigCustomEntry, FocusedTextInput, IpcCallback }
     private readonly unsafe struct TextInputTarget
     {
         public TextInputTarget(AtkUnitBase* addon, AtkComponentTextInput* input, AtkResNode* node, Vector2 position, Vector2 size)
