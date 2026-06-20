@@ -19,6 +19,7 @@ using Dalamud.IoC;
 using Dalamud.Plugin;
 using Dalamud.Plugin.Services;
 using FFXIVClientStructs.FFXIV.Client.UI;
+using FFXIVClientStructs.FFXIV.Client.System.String;
 using FFXIVClientStructs.FFXIV.Component.GUI;
 namespace QuickSymbols;
 
@@ -87,6 +88,18 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
     [PluginService] internal static IGameConfig GameConfig { get; private set; } = null!;
     [PluginService] internal static IKeyState KeyState { get; private set; } = null!;
     [PluginService] internal static IPluginLog Log { get; private set; } = null!;
+    [PluginService] internal static IChatGui ChatGui { get; private set; } = null!;
+
+    // Auto-symbol rules are stored separately from the normal Custom tab entries on purpose.
+    // "Custom" is just a symbol/snippet list shown inside the picker, while these rules change text
+    // that the player is actively typing in vanilla chat. Keeping them as Text + Symbol pairs makes
+    // the config easier to read and also keeps old QuickSymbols configs safe since the default list
+    // starts empty and only fills when the user creates their own replacements.
+    public sealed class TextSymbolReplacement
+    {
+        public string Text { get; set; } = string.Empty;
+        public string Symbol { get; set; } = string.Empty;
+    }
 
     public sealed class PluginConfiguration : IPluginConfiguration
     {
@@ -121,6 +134,9 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         // Main chat button placement. This is kept as a int so old configs still load safely if this list changes later.
         public int ButtonPlacement { get; set; } = ButtonPlacementRight;
 
+        public bool ReplaceSpecificTextsForSymbols { get; set; } = false;
+        public List<TextSymbolReplacement> CustomTextReplacements { get; set; } = [];
+
         // Users can enable this so the list uses Dalamud style instead of FFXIV theme.
         public bool UseDalamudTheme { get; set; }
         public bool ConfigWindowHadFirstOpen { get; set; }
@@ -133,6 +149,9 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
     private IFontHandle? symbolFont;
     private PopupTab selectedPopupTab = PopupTab.Symbols;
     private string newCustomEntry = string.Empty;
+    private string newTextReplacementText = string.Empty;
+    private string newTextReplacementSymbol = "\uE04B";
+    private string newTextReplacementError = string.Empty;
     // #
 
     // Control and Visibility stuff
@@ -205,6 +224,9 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
     private bool draggingScrollBar;
     private float scrollDragOffsetY;
     private bool configWindowOpen;
+    private bool autoSymbolListOpen;
+    private bool autoSymbolPickerOpen;
+    private bool autoSymbolHelpOpen;
     // Track its popup anchor ourselves so the picker can open from the keybind inside the config window.
     private bool configCustomEntryPopupOpen;
     private Vector2 configCustomEntryPopupAnchorPos;
@@ -212,6 +234,7 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
     private bool configCustomEntryActive;
     private bool hotkeyRecording;
     private bool hotkeyWasDown;
+    private bool textReplacementPending;
     private int hotkeyCaptureDelayFrames;
     private readonly List<VirtualKey> pendingHotkey = [];
     private readonly Stopwatch hotkeySafety = Stopwatch.StartNew();
@@ -393,9 +416,492 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
                 ref this.configCustomEntryPopupOpen);
         }
 
+        this.DrawAutoSymbolListWindow(ref changed);
+        this.DrawAutoSymbolHelpWindow();
+
         if (changed)
         {
             this.SaveConfig();
+        }
+    }
+
+    // This is the little management window for the auto-symbol feature.
+    // It ended up being more than a simple list because custom replacements need some guard rails:
+    // no normal words like "star", no reusing the built-in shortcuts, no duplicate symbol targets,
+    // and no command-looking text. The UI tries to show those rules right where the user is typing.
+    // The warning icon is also kept visible here because this feature only makes sense for the game
+    //  own chat input, not Chat2 or random plugin ImGui boxes.
+    private void DrawAutoSymbolListWindow(ref bool hasChanged)
+    {
+        if (!this.autoSymbolListOpen)
+        {
+            return;
+        }
+
+        var scale = ImGuiHelpers.GlobalScale;
+        ImGui.SetNextWindowSize(new Vector2(720f * scale, 520f * scale), ImGuiCond.FirstUseEver);
+
+        if (!ImGui.Begin("Chat Auto-Symbol List", ref this.autoSymbolListOpen, ImGuiWindowFlags.NoCollapse))
+        {
+            ImGui.End();
+            return;
+        }
+
+        ImGui.TextColored(new Vector4(1f, 0.78f, 0.14f, 1f), "Automatic text replacements");
+        ImGui.SameLine();
+        ImGui.TextDisabled("Vanilla chat only");
+
+        ImGui.Spacing();
+        ImGui.TextUnformatted("New:");
+        ImGui.SameLine();
+
+        var status = this.GetNewTextReplacementStatus();
+        var invalidText = status.HighlightText && !string.IsNullOrEmpty(this.newTextReplacementText);
+        var inputWidth = Math.Max(150f * scale, ImGui.GetContentRegionAvail().X - 238f * scale);
+
+        ImGui.SetNextItemWidth(inputWidth);
+        using (invalidText ? ImRaii.PushColor(ImGuiCol.Text, new Vector4(1f, 0.35f, 0.35f, 1f)) : null)
+        {
+            var newText = this.newTextReplacementText;
+            if (ImGui.InputText("##NewTextReplacementText", ref newText, 32))
+            {
+                this.newTextReplacementText = SanitizeReplacementText(newText);
+                this.newTextReplacementError = string.Empty;
+            }
+        }
+
+        ImGui.SameLine();
+        using (this.symbolFont is { Available: true } ? this.symbolFont.Push() : null)
+        {
+            if (ImGui.Button($"{this.newTextReplacementSymbol}##PickTextReplacementSymbol", new Vector2(32f * scale, 0f)))
+            {
+                ImGui.OpenPopup("##AutoSymbolPickerPopup");
+            }
+        }
+
+        this.DrawAutoSymbolPickerPopup();
+
+        ImGui.SameLine();
+        if (!status.Valid)
+        {
+            ImGui.BeginDisabled();
+        }
+
+        if (ImGui.Button("Save##SaveTextReplacement", new Vector2(54f * scale, 0f)))
+        {
+            if (this.TrySaveTextReplacement(out var error))
+            {
+                hasChanged = true;
+                this.newTextReplacementText = string.Empty;
+                this.newTextReplacementSymbol = this.GetDefaultNewReplacementSymbol();
+                this.newTextReplacementError = string.Empty;
+            }
+            else
+            {
+                this.newTextReplacementError = error;
+            }
+        }
+
+        if (!status.Valid)
+        {
+            ImGui.EndDisabled();
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button("Help##AutoSymbolHelp", new Vector2(54f * scale, 0f)))
+        {
+            this.autoSymbolHelpOpen = true;
+        }
+
+        ImGui.SameLine();
+        using (PushQuickSymbolsIconFont())
+        {
+            ImGui.TextColored(new Vector4(1f, 0.35f, 0.35f, 1f), char.ConvertFromUtf32(0xF071));
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("This is only compatible with vanilla chat and vanilla chat ONLY.");
+        }
+
+        if (!status.Valid && !string.IsNullOrEmpty(status.Message))
+        {
+            ImGui.TextColored(new Vector4(1f, 0.35f, 0.35f, 1f), status.Message);
+        }
+        else if (!string.IsNullOrEmpty(this.newTextReplacementError))
+        {
+            ImGui.TextColored(new Vector4(1f, 0.35f, 0.35f, 1f), this.newTextReplacementError);
+        }
+        else
+        {
+            ImGui.TextDisabled("Examples: :sparkle:, [sparkle], ;sparkle;, -sparkle-, =sparkle=");
+        }
+
+        ImGui.Spacing();
+        this.DrawTextReplacementListPanel(ref hasChanged);
+        ImGui.End();
+    }
+
+    private void DrawAutoSymbolHelpWindow()
+    {
+        if (!this.autoSymbolHelpOpen)
+        {
+            return;
+        }
+
+        var scale = ImGuiHelpers.GlobalScale;
+        ImGui.SetNextWindowSize(new Vector2(560f * scale, 420f * scale), ImGuiCond.FirstUseEver);
+
+        if (!ImGui.Begin("Chat Auto-Symbol Help", ref this.autoSymbolHelpOpen, ImGuiWindowFlags.NoCollapse))
+        {
+            ImGui.End();
+            return;
+        }
+
+        ImGui.TextColored(new Vector4(1f, 0.78f, 0.14f, 1f), "How to create automatic symbol text");
+        ImGui.Separator();
+
+        ImGui.TextWrapped("This feature watches the current vanilla chat input. When the end of your message matches a registered text, QuickSymbols removes that text and inserts the selected symbol.");
+        ImGui.Spacing();
+
+        ImGui.TextColored(new Vector4(0.65f, 0.85f, 1f, 1f), "Valid custom text formats");
+        ImGui.BulletText("Must start and finish with the same supported wrapper:");
+        ImGui.Indent();
+        ImGui.TextUnformatted(":name:");
+        ImGui.TextUnformatted("[name]");
+        ImGui.TextUnformatted(";name;");
+        ImGui.TextUnformatted("-name-");
+        ImGui.TextUnformatted("=name=");
+        ImGui.Unindent();
+
+        ImGui.Spacing();
+        ImGui.TextColored(new Vector4(0.65f, 0.85f, 1f, 1f), "Rules");
+        ImGui.BulletText("The name inside the wrapper can only use letters and numbers.");
+        ImGui.BulletText("Spaces are not allowed.");
+        ImGui.BulletText("Texts cannot start with / or \\.");
+        ImGui.BulletText("You cannot reuse an existing text, existing name, or existing symbol.");
+        ImGui.BulletText("Auto replacement is skipped for vanilla chat commands, meaning messages starting with / are ignored.");
+
+        ImGui.Spacing();
+        ImGui.TextColored(new Vector4(0.65f, 0.85f, 1f, 1f), "Examples");
+        ImGui.BulletText(":star: -> selected star symbol");
+        ImGui.BulletText("[dice] -> selected dice symbol");
+        ImGui.BulletText("-heart- -> selected heart symbol");
+
+        ImGui.Spacing();
+        ImGui.TextColored(new Vector4(1f, 0.35f, 0.35f, 1f), "Important");
+        ImGui.TextWrapped("This is only compatible with vanilla chat and vanilla chat ONLY.");
+        ImGui.End();
+    }
+
+    private void DrawTextReplacementListPanel(ref bool hasChanged)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var panelHeight = Math.Max(220f * scale, ImGui.GetContentRegionAvail().Y);
+        ImGui.BeginChild("##ChatAutoSymbolListPanel", new Vector2(0f, panelHeight), true);
+
+        ImGui.Columns(3, "##AutoSymbolColumns", false);
+
+        this.Config.CustomTextReplacements ??= [];
+        for (var i = 0; i < this.Config.CustomTextReplacements.Count; i++)
+        {
+            var custom = this.Config.CustomTextReplacements[i];
+            if (string.IsNullOrWhiteSpace(custom.Text) || string.IsNullOrEmpty(custom.Symbol))
+            {
+                continue;
+            }
+
+            this.DrawReplacementCard(custom.Text, custom.Symbol, "Custom", removable: true, removeIndex: i, customCard: true, ref hasChanged);
+            ImGui.NextColumn();
+        }
+
+        foreach (var row in GetDefaultReplacementDisplayRows())
+        {
+            this.DrawReplacementCard(row.Text, row.Symbol, row.Kind, removable: false, removeIndex: -1, customCard: false, ref hasChanged);
+            ImGui.NextColumn();
+        }
+
+        ImGui.Columns(1);
+        ImGui.EndChild();
+    }
+
+    private void DrawReplacementCard(string text, string symbol, string kind, bool removable, int removeIndex, bool customCard, ref bool hasChanged)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var width = Math.Max(120f * scale, ImGui.GetColumnWidth() - 8f * scale);
+        var height = 58f * scale;
+        var pos = ImGui.GetCursorScreenPos();
+        var drawList = ImGui.GetWindowDrawList();
+        var bg = customCard
+            ? new Vector4(1f, 0.78f, 0.14f, 0.10f)
+            : ImGui.GetStyle().Colors[(int)ImGuiCol.FrameBg];
+        var border = ImGui.GetStyle().Colors[(int)ImGuiCol.Border];
+
+        drawList.AddRectFilled(pos, pos + new Vector2(width, height), ImGui.GetColorU32(bg), 5f * scale);
+        drawList.AddRect(pos, pos + new Vector2(width, height), ImGui.GetColorU32(border), 5f * scale, ImDrawFlags.None, Math.Max(1f, scale));
+
+        ImGui.SetCursorScreenPos(pos + new Vector2(8f * scale, 5f * scale));
+        ImGui.TextDisabled(kind);
+
+        if (removable)
+        {
+            var xPos = pos + new Vector2(width - 24f * scale, 5f * scale);
+            ImGui.SetCursorScreenPos(xPos);
+            if (ImGui.SmallButton($"X##RemoveTextReplacement{removeIndex}"))
+            {
+                this.Config.CustomTextReplacements.RemoveAt(removeIndex);
+                hasChanged = true;
+            }
+        }
+
+        ImGui.SetCursorScreenPos(pos + new Vector2(8f * scale, 27f * scale));
+        ImGui.TextUnformatted(text);
+        ImGui.SameLine();
+        ImGui.TextDisabled("=>");
+        ImGui.SameLine();
+        using (this.symbolFont is { Available: true } ? this.symbolFont.Push() : null)
+        {
+            ImGui.TextUnformatted(symbol);
+        }
+
+        ImGui.SetCursorScreenPos(pos + new Vector2(0f, height + 6f * scale));
+    }
+
+    // Symbol picker used only by the custom replacement creator.
+    // It intentionally filters out symbols that already belong to a default or user rule. The goal is
+    // to avoid ambiguous replacements like two different texts both becoming the same icon.
+    private void DrawAutoSymbolPickerPopup()
+    {
+        if (!ImGui.BeginPopup("##AutoSymbolPickerPopup"))
+        {
+            return;
+        }
+
+        var scale = ImGuiHelpers.GlobalScale;
+        var entries = this.GetAvailablePickerSymbols();
+        var columns = 9;
+        var cell = 26f * scale;
+        var spacing = 3f * scale;
+        var scrollPad = ImGui.GetStyle().ScrollbarSize + 12f * scale;
+        var rows = Math.Min(8, Math.Max(1, (int)Math.Ceiling(entries.Count / (double)columns)));
+        var height = rows * cell + Math.Max(0, rows - 1) * spacing + 8f * scale;
+        var width = columns * cell + Math.Max(0, columns - 1) * spacing + scrollPad;
+
+        ImGui.BeginChild("##AutoSymbolPickerPopupBody", new Vector2(width, height), true);
+        var start = ImGui.GetCursorScreenPos();
+        var drawList = ImGui.GetWindowDrawList();
+
+        using (this.symbolFont is { Available: true } ? this.symbolFont.Push() : null)
+        {
+            for (var i = 0; i < entries.Count; i++)
+            {
+                var row = i / columns;
+                var col = i % columns;
+                var pos = start + new Vector2(col * (cell + spacing), row * (cell + spacing));
+                ImGui.SetCursorScreenPos(pos);
+                ImGui.InvisibleButton($"##AutoSymbolPick{i}", new Vector2(cell, cell));
+
+                var hovered = ImGui.IsItemHovered();
+                drawList.AddRectFilled(pos, pos + new Vector2(cell, cell), ImGui.GetColorU32(hovered ? ImGui.GetStyle().Colors[(int)ImGuiCol.FrameBgHovered] : ImGui.GetStyle().Colors[(int)ImGuiCol.FrameBg]), 4f * scale);
+
+                var symbol = entries[i];
+                var symbolSize = ImGui.CalcTextSize(symbol);
+                drawList.AddText(pos + (new Vector2(cell, cell) - symbolSize) * 0.5f, ImGui.GetColorU32(ImGui.GetStyle().Colors[(int)ImGuiCol.Text]), symbol);
+
+                if (ImGui.IsItemClicked())
+                {
+                    this.newTextReplacementSymbol = symbol;
+                    this.newTextReplacementError = string.Empty;
+                    ImGui.CloseCurrentPopup();
+                }
+            }
+        }
+
+        ImGui.EndChild();
+        ImGui.EndPopup();
+    }
+
+    private List<string> GetAvailablePickerSymbols()
+    {
+        this.Config.CustomTextReplacements ??= [];
+
+        var used = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var replacement in DefaultTextReplacements)
+        {
+            if (!string.IsNullOrEmpty(replacement.Symbol))
+            {
+                used.Add(replacement.Symbol);
+            }
+        }
+
+        foreach (var replacement in this.Config.CustomTextReplacements)
+        {
+            if (!string.IsNullOrEmpty(replacement.Symbol))
+            {
+                used.Add(replacement.Symbol);
+            }
+        }
+
+        return Symbols
+            .Concat(NumberSymbols)
+            .Concat(LetterSymbols)
+            .Concat(CommonSymbols)
+            .Concat(OthersSymbols)
+            .Concat(TimeSymbols)
+            .Distinct(StringComparer.Ordinal)
+            .Where(symbol => !used.Contains(symbol))
+            .ToList();
+    }
+
+    private string GetDefaultNewReplacementSymbol()
+    {
+        const string fallback = "\uE04B";
+        var available = this.GetAvailablePickerSymbols();
+        return available.Contains(fallback, StringComparer.Ordinal)
+            ? fallback
+            : available.FirstOrDefault() ?? fallback;
+    }
+
+    private bool TrySaveTextReplacement(out string error)
+    {
+        this.Config.CustomTextReplacements ??= [];
+
+        var status = this.GetNewTextReplacementStatus();
+        if (!status.Valid)
+        {
+            error = status.Message;
+            return false;
+        }
+
+        this.Config.CustomTextReplacements.Add(new TextSymbolReplacement
+        {
+            Text = SanitizeReplacementText(this.newTextReplacementText),
+            Symbol = this.newTextReplacementSymbol,
+        });
+
+        error = string.Empty;
+        return true;
+    }
+
+    // Validation for user-created auto-symbol rules.
+    // The wrapper requirement is intentional. Without it, someone could create a plain word like
+    // "square" and then normal conversation would start replacing itself. For the same reason I compare
+    // the inner name too, so :star: and ;star; are treated as the same name even though the wrapper is
+    // different. It is a little stricter but it avoids a lot of possible issues later.
+    private NewTextReplacementStatus GetNewTextReplacementStatus()
+    {
+        var text = SanitizeReplacementText(this.newTextReplacementText);
+        var symbol = this.newTextReplacementSymbol;
+        var name = GetReplacementName(text);
+
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return NewTextReplacementStatus.Invalid(string.Empty, highlightText: false);
+        }
+
+        if (!IsValidReplacementWrapper(text))
+        {
+            return NewTextReplacementStatus.Invalid("Need to start and finish with \":\" or \"[ ]\" or \";\" or \"-\" or \"=\".", highlightText: true);
+        }
+
+        if (string.IsNullOrWhiteSpace(name) || !name.All(char.IsLetterOrDigit))
+        {
+            return NewTextReplacementStatus.Invalid("Only letters and numbers are allowed inside the wrapper.", highlightText: true);
+        }
+
+        if (text.StartsWith("/", StringComparison.Ordinal) || text.StartsWith("\\", StringComparison.Ordinal))
+        {
+            return NewTextReplacementStatus.Invalid("Text cannot start with / or \\.", highlightText: true);
+        }
+
+        if (DefaultTextReplacements.Any(rule => string.Equals(rule.Text, text, StringComparison.Ordinal))
+            || DefaultTextReplacements.Any(rule => string.Equals(GetReplacementName(rule.Text), name, StringComparison.OrdinalIgnoreCase))
+            || this.Config.CustomTextReplacements.Any(rule => string.Equals(rule.Text, text, StringComparison.Ordinal))
+            || this.Config.CustomTextReplacements.Any(rule => string.Equals(GetReplacementName(rule.Text), name, StringComparison.OrdinalIgnoreCase)))
+        {
+            return NewTextReplacementStatus.Invalid("You can't create or use already existing Texts/Symbols", highlightText: true);
+        }
+
+        if (DefaultTextReplacements.Any(rule => string.Equals(rule.Symbol, symbol, StringComparison.Ordinal))
+            || this.Config.CustomTextReplacements.Any(rule => string.Equals(rule.Symbol, symbol, StringComparison.Ordinal)))
+        {
+            return NewTextReplacementStatus.Invalid("You can't create or use already existing Texts/Symbols", highlightText: false);
+        }
+
+        if (string.IsNullOrEmpty(symbol))
+        {
+            return NewTextReplacementStatus.Invalid("Pick a symbol first.", highlightText: false);
+        }
+
+        return NewTextReplacementStatus.ValidStatus;
+    }
+
+    private static bool IsValidReplacementWrapper(string text)
+    {
+        if (text.Length < 3)
+        {
+            return false;
+        }
+
+        return text.StartsWith(":", StringComparison.Ordinal) && text.EndsWith(":", StringComparison.Ordinal)
+               || text.StartsWith("[", StringComparison.Ordinal) && text.EndsWith("]", StringComparison.Ordinal)
+               || text.StartsWith(";", StringComparison.Ordinal) && text.EndsWith(";", StringComparison.Ordinal)
+               || text.StartsWith("-", StringComparison.Ordinal) && text.EndsWith("-", StringComparison.Ordinal)
+               || text.StartsWith("=", StringComparison.Ordinal) && text.EndsWith("=", StringComparison.Ordinal);
+    }
+
+    private static string GetReplacementName(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text) || text.Length < 2)
+        {
+            return string.Empty;
+        }
+
+        if (IsValidReplacementWrapper(text))
+        {
+            return text[1..^1];
+        }
+
+        return text;
+    }
+
+    private static string SanitizeReplacementText(string text)
+    {
+        var allowed = new HashSet<char> { ':', '[', ']', ';', '-', '=' };
+        return new string(text.Where(ch => char.IsLetterOrDigit(ch) || allowed.Contains(ch)).ToArray());
+    }
+
+    private static IEnumerable<(string Text, string Symbol, string Kind)> GetDefaultReplacementDisplayRows()
+    {
+        yield return ("[a] to [z]", $"{char.ConvertFromUtf32(0xE071)} to {char.ConvertFromUtf32(0xE08A)}", "Default");
+        yield return ("[1] to [31]", $"{char.ConvertFromUtf32(0xE090)} to {char.ConvertFromUtf32(0xE0AE)}", "Default");
+
+        foreach (var replacement in DefaultTextReplacements
+                     .Where(rule => !rule.Text.StartsWith("[", StringComparison.Ordinal))
+                     .OrderByDescending(rule => rule.Text.Length))
+        {
+            yield return (replacement.Text, replacement.Symbol, "Default");
+        }
+    }
+
+    private bool DrawConfigIconButton(string id, int codepoint)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var text = char.ConvertFromUtf32(codepoint);
+        using (PushQuickSymbolsIconFont())
+        {
+            return ImGui.SmallButton($"{text}{id}");
+        }
+    }
+
+    private void SetAutomaticTextReplacement(bool enabled, bool printEnabledMessage)
+    {
+        var wasEnabled = this.Config.ReplaceSpecificTextsForSymbols;
+        this.Config.ReplaceSpecificTextsForSymbols = enabled;
+
+        if (!wasEnabled && enabled && printEnabledMessage)
+        {
+            ChatGui.Print("Automatic text to symbol Enabled. You can test typing the following: <3 or :clock: or :dice:. Open the settings menu for the full list.");
         }
     }
 
@@ -873,6 +1379,29 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
             ImGui.EndCombo();
         }
 
+        var replaceSpecificTexts = this.Config.ReplaceSpecificTextsForSymbols;
+        if (ImGui.Checkbox("Automatic replace text to symbol", ref replaceSpecificTexts))
+        {
+            this.SetAutomaticTextReplacement(replaceSpecificTexts, printEnabledMessage: true);
+            hasChanged = true;
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Texts like <3, :dice: etc will be automaticaly replaced\nwith it actual symbol");
+        }
+
+        ImGui.SameLine();
+        if (this.DrawConfigIconButton("##OpenAutoSymbolList", 0xF00B))
+        {
+            this.autoSymbolListOpen = true;
+        }
+
+        if (ImGui.IsItemHovered())
+        {
+            ImGui.SetTooltip("Symbol list and creation");
+        }
+
         // This only swaps the popup list to Dalamud style colors.
         // Leaving it off keeps the current FFXIV/chat-theme look.
         var useDalamudTheme = this.Config.UseDalamudTheme;
@@ -1006,6 +1535,7 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
     private void FrameworkUpdate(IFramework framework)
     {
         this.FlushButtonPositionSave();
+        this.TryRewriteHeartShortcutFromChatKeys();
 
         if (this.TryOpenConfigCustomEntryPopup())
         {
@@ -1032,6 +1562,289 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         }
 
         this.TryOpenKeybindPopupFromCurrentFocus();
+    }
+
+    // The actual replacement loop is based on the current text in the vanilla ChatLog input.
+    // Earlier attempts tried to track key presses but that breaks as soon as someone mistypes,
+    // clicks the caret somewhere else, uses arrows or fixes the text with backspace. Reading the
+    // input text itself is much closer to how people actually type. I only look for a replacement
+    // at the end of the current message and skip anything starting with "/" so commands are left alone.
+    private void TryRewriteHeartShortcutFromChatKeys()
+    {
+        if (!this.Config.ReplaceSpecificTextsForSymbols)
+        {
+            this.textReplacementPending = false;
+            return;
+        }
+
+        try
+        {
+            if (this.textReplacementPending)
+            {
+                return;
+            }
+
+            if (!this.IsGameWindowFocused())
+            {
+                return;
+            }
+
+            var chatUnit = GameGui.GetAddonByName(ChatLogAddonName);
+            var chatLog = GameGui.GetAddonByName<AddonChatLog>(ChatLogAddonName);
+
+            if (chatUnit.IsNull || !chatUnit.IsReady || !chatUnit.IsVisible || chatLog == null || chatLog->TextInput == null)
+            {
+                return;
+            }
+
+            var input = chatLog->TextInput;
+            if (!input->Enabled || !input->IsActive)
+            {
+                return;
+            }
+
+            var text = GetTextInputString(input);
+            if (string.IsNullOrEmpty(text) || text.StartsWith("/", StringComparison.Ordinal) || !this.TryGetTrailingTextReplacement(text, out var charsToRemove, out var symbol))
+            {
+                return;
+            }
+
+            this.textReplacementPending = true;
+            _ = Framework.RunOnTick(() => this.ReplaceTrailingShortcutInChatInput(charsToRemove, symbol), delayTicks: 1);
+        }
+        catch (Exception ex)
+        {
+            this.textReplacementPending = false;
+            Log.Debug($"QuickSymbols chat input text replacement skipped. {ex}");
+        }
+    }
+
+    // Once a match is found I do not rewrite the whole input with SetText.
+    // SetText worked but it made the field flicker and could cause the raw shortcut text to come back
+    // after the next key press. The safer is: confirm the same shortcut is still at the end, send
+    // only the needed backspaces, then insert the final symbol through the same native InsertText path
+    // QuickSymbols already uses everywhere else. It feels a bit indirect but it keeps the chat input
+    // behaving like the player typed the symbol normally.
+    private void ReplaceTrailingShortcutInChatInput(int charsToRemove, string symbol)
+    {
+        try
+        {
+            if (!this.IsGameWindowFocused())
+            {
+                this.textReplacementPending = false;
+                return;
+            }
+
+            var chatUnit = GameGui.GetAddonByName(ChatLogAddonName);
+            var chatLog = GameGui.GetAddonByName<AddonChatLog>(ChatLogAddonName);
+
+            if (chatUnit.IsNull || !chatUnit.IsReady || !chatUnit.IsVisible || chatLog == null || chatLog->TextInput == null)
+            {
+                this.textReplacementPending = false;
+                return;
+            }
+
+            var input = chatLog->TextInput;
+            if (!input->Enabled || !input->IsActive)
+            {
+                this.textReplacementPending = false;
+                return;
+            }
+
+            var text = GetTextInputString(input);
+            if (text.StartsWith("/", StringComparison.Ordinal)
+                || !this.TryGetTrailingTextReplacement(text, out var currentRemove, out var currentSymbol)
+                || currentRemove != charsToRemove
+                || !string.Equals(currentSymbol, symbol, StringComparison.Ordinal))
+            {
+                this.textReplacementPending = false;
+                return;
+            }
+
+            SendKeyPress(VirtualKeyBackspace, charsToRemove);
+
+            _ = Framework.RunOnTick(() =>
+            {
+                try
+                {
+                    if (!this.IsGameWindowFocused())
+                    {
+                        return;
+                    }
+
+                    var nextChatUnit = GameGui.GetAddonByName(ChatLogAddonName);
+                    var nextChatLog = GameGui.GetAddonByName<AddonChatLog>(ChatLogAddonName);
+
+                    if (nextChatUnit.IsNull || !nextChatUnit.IsReady || !nextChatUnit.IsVisible || nextChatLog == null || nextChatLog->TextInput == null)
+                    {
+                        return;
+                    }
+
+                    if (!nextChatLog->TextInput->Enabled || !nextChatLog->TextInput->IsActive)
+                    {
+                        return;
+                    }
+
+                    nextChatLog->TextInput->InsertText(symbol, false);
+                    this.AdvanceCaretOnNextTick(this.AdvanceChatCaretRightIfStillActive, symbol);
+                }
+                catch (Exception ex)
+                {
+                    Log.Debug($"QuickSymbols chat input replacement insert skipped. {ex}");
+                }
+                finally
+                {
+                    this.textReplacementPending = false;
+                }
+            }, delayTicks: 1);
+        }
+        catch (Exception ex)
+        {
+            this.textReplacementPending = false;
+            Log.Debug($"QuickSymbols chat input replacement skipped. {ex}");
+        }
+    }
+
+    private static string GetTextInputString(AtkComponentTextInput* input)
+    {
+        if (input == null)
+        {
+            return string.Empty;
+        }
+
+        var raw = input->AtkComponentInputBase.RawString.ToString();
+        if (!string.IsNullOrEmpty(raw))
+        {
+            return raw;
+        }
+
+        return input->AtkComponentInputBase.EvaluatedString.ToString();
+    }
+
+    // Built-in auto-symbol shortcuts.
+    // The array is sorted by shortcut length so longer entries win first. That matters for things like
+    // [10] before [1] and it also makes future additions less fragile. User-created replacements are
+    // added after these defaults but the validation UI blocks users from creating duplicated names/symbols
+    // so this list stays the source of truth for the shipped shortcuts.
+    private static readonly (string Text, string Symbol)[] DefaultTextReplacements =
+    [
+        (":colectible:", "\uE03D"),
+        (":flower:", "\uE05D"),
+        (":sprout:", "\uE034"),
+        (":clock:", "\uE031"),
+        (":shard:", "\uE048"),
+        (":dice:", "\uE03E"),
+        (":star:", "★"),
+        (":plus:", "\uE04E"),
+        (":am:", "\uE06D"),
+        (":pm:", "\uE06E"),
+        (":hq:", "\uE03C"),
+        ("[10]", "\uE099"),
+        ("[11]", "\uE09A"),
+        ("[12]", "\uE09B"),
+        ("[13]", "\uE09C"),
+        ("[14]", "\uE09D"),
+        ("[15]", "\uE09E"),
+        ("[16]", "\uE09F"),
+        ("[17]", "\uE0A0"),
+        ("[18]", "\uE0A1"),
+        ("[19]", "\uE0A2"),
+        ("[20]", "\uE0A3"),
+        ("[21]", "\uE0A4"),
+        ("[22]", "\uE0A5"),
+        ("[23]", "\uE0A6"),
+        ("[24]", "\uE0A7"),
+        ("[25]", "\uE0A8"),
+        ("[26]", "\uE0A9"),
+        ("[27]", "\uE0AA"),
+        ("[28]", "\uE0AB"),
+        ("[29]", "\uE0AC"),
+        ("[30]", "\uE0AD"),
+        ("[31]", "\uE0AE"),
+        (":x:", "\uE04C"),
+        ("[a]", "\uE071"),
+        ("[b]", "\uE072"),
+        ("[c]", "\uE073"),
+        ("[d]", "\uE074"),
+        ("[e]", "\uE075"),
+        ("[f]", "\uE076"),
+        ("[g]", "\uE077"),
+        ("[h]", "\uE078"),
+        ("[i]", "\uE079"),
+        ("[j]", "\uE07A"),
+        ("[k]", "\uE07B"),
+        ("[l]", "\uE07C"),
+        ("[m]", "\uE07D"),
+        ("[n]", "\uE07E"),
+        ("[o]", "\uE07F"),
+        ("[p]", "\uE080"),
+        ("[q]", "\uE081"),
+        ("[r]", "\uE082"),
+        ("[s]", "\uE083"),
+        ("[t]", "\uE084"),
+        ("[u]", "\uE085"),
+        ("[v]", "\uE086"),
+        ("[w]", "\uE087"),
+        ("[x]", "\uE088"),
+        ("[y]", "\uE089"),
+        ("[z]", "\uE08A"),
+        ("[1]", "\uE090"),
+        ("[2]", "\uE091"),
+        ("[3]", "\uE092"),
+        ("[4]", "\uE093"),
+        ("[5]", "\uE094"),
+        ("[6]", "\uE095"),
+        ("[7]", "\uE096"),
+        ("[8]", "\uE097"),
+        ("[9]", "\uE098"),
+        ("<3", "♥"),
+    ];
+
+    private bool TryGetTrailingTextReplacement(string text, out int charsToRemove, out string symbol)
+    {
+        foreach (var replacement in this.GetAllTextReplacements())
+        {
+            if (!text.EndsWith(replacement.Text, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            charsToRemove = replacement.Text.Length;
+            symbol = replacement.Symbol;
+            return true;
+        }
+
+        charsToRemove = 0;
+        symbol = string.Empty;
+        return false;
+    }
+
+    private IEnumerable<(string Text, string Symbol)> GetAllTextReplacements()
+    {
+        foreach (var replacement in DefaultTextReplacements)
+        {
+            yield return replacement;
+        }
+
+        this.Config.CustomTextReplacements ??= [];
+        foreach (var custom in this.Config.CustomTextReplacements
+                     .Where(rule => !string.IsNullOrWhiteSpace(rule.Text) && !string.IsNullOrEmpty(rule.Symbol))
+                     .OrderByDescending(rule => rule.Text.Length))
+        {
+            yield return (custom.Text, custom.Symbol);
+        }
+    }
+
+    private bool IsGameWindowFocused()
+    {
+        var foreground = GetForegroundWindow();
+        if (foreground == nint.Zero)
+        {
+            return false;
+        }
+
+        _ = GetWindowThreadProcessId(foreground, out var processId);
+        return processId == Environment.ProcessId;
     }
 
     private bool TryOpenConfigCustomEntryPopup()
@@ -1733,6 +2546,43 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         return clicked;
     }
 
+    private void DrawPopupTextReplaceToggle(Vector2 pos, Vector2 size, UiColors colors, string idSuffix)
+    {
+        var scale = ImGuiHelpers.GlobalScale;
+        var drawList = ImGui.GetWindowDrawList();
+
+        ImGui.SetCursorScreenPos(pos);
+        if (ImGui.InvisibleButton($"##QuickSymbolsTextReplacementButton{idSuffix}", size))
+        {
+            this.SetAutomaticTextReplacement(!this.Config.ReplaceSpecificTextsForSymbols, printEnabledMessage: true);
+            this.SaveConfig();
+        }
+
+        var hovered = ImGui.IsItemHovered();
+        if (hovered)
+        {
+            ImGui.SetTooltip(this.Config.ReplaceSpecificTextsForSymbols
+                ? "Disable text to symbol replacement"
+                : "Enable text to symbol replacement");
+        }
+
+        drawList.AddRectFilled(pos, pos + size, Color(hovered ? colors.CellHovered : colors.CellBackground), 4f * scale);
+
+        var iconText = char.ConvertFromUtf32(0xE2CA);
+        var iconFont = PushQuickSymbolsIconFont();
+        var font = ImGui.GetFont();
+        var fontSize = ImGui.GetFontSize() * 0.82f;
+        var iconSize = ImGui.CalcTextSize(iconText) * 0.82f;
+        var iconColor = this.Config.ReplaceSpecificTextsForSymbols
+            ? new Vector4(1f, 0.78f, 0.14f, 1f)
+            : hovered
+                ? new Vector4(1f, 0.88f, 0.05f, 1f)
+                : colors.Text;
+
+        drawList.AddText(font, fontSize, pos + (size - iconSize) * 0.5f, Color(iconColor), iconText);
+        iconFont?.Dispose();
+    }
+
     private void HandleButtonDragging(Vector2 size, bool active)
     {
         var io = ImGui.GetIO();
@@ -1861,9 +2711,14 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
 
                 if (includePositionEditor)
                 {
+                    var replaceText = char.ConvertFromUtf32(0xE2CA);
+                    var replaceSize = closeSize;
+                    var replacePos = new Vector2(settingsPos.X - replaceSize.X - 5f * scale, closePos.Y);
+                    this.DrawPopupTextReplaceToggle(replacePos, replaceSize, colors, idSuffix);
+
                     var editText = char.ConvertFromUtf32(0xF047);
                     var editbSize = closeSize;
-                    var editbPos = new Vector2(settingsPos.X - editbSize.X - 5f * scale, closePos.Y);
+                    var editbPos = new Vector2(replacePos.X - editbSize.X - 5f * scale, closePos.Y);
 
                     ImGui.SetCursorScreenPos(editbPos);
                     if (ImGui.InvisibleButton($"##QuickSymbolsMoveButton{idSuffix}", editbSize))
@@ -3259,6 +4114,12 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
     }
 
     [DllImport("user32.dll")]
+    private static extern nint GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(nint hWnd, out int processId);
+
+    [DllImport("user32.dll")]
     private static extern short GetAsyncKeyState(int virtualKey);
 
     [DllImport("user32.dll", SetLastError = true)]
@@ -3545,6 +4406,25 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
 
 
     // Auxiliary Types
+    private readonly struct NewTextReplacementStatus
+    {
+        private NewTextReplacementStatus(bool valid, string message, bool highlightText)
+        {
+            this.Valid = valid;
+            this.Message = message;
+            this.HighlightText = highlightText;
+        }
+
+        public bool Valid { get; }
+        public string Message { get; }
+        public bool HighlightText { get; }
+
+        public static NewTextReplacementStatus ValidStatus { get; } = new(true, string.Empty, false);
+
+        public static NewTextReplacementStatus Invalid(string message, bool highlightText)
+            => new(false, message, highlightText);
+    }
+
     private enum PopupPlacement { AboveRight, Below }
 
     // Popup tabs | Must match the tab routing in DrawSymbolsPopup and the visual order in DrawPopupTabs.

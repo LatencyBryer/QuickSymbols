@@ -9,7 +9,7 @@
 [![AGPL-3.0 License](https://img.shields.io/badge/⚖️%20License-AGPL--3.0-636e72?style=for-the-badge)](https://github.com/LatencyBryer/QuickSymbols?tab=AGPL-3.0-1-ov-file)
 
 Adds a fast symbol picker for FFXIV chat and other text inputs.
-It lets you insert special characters, icons, favorites, custom entries and short snippets through a clean in-game popup.
+It lets you insert special characters, icons, favorites, custom entries, short snippets and optional automatic text-to-symbol replacements through a clean in-game popup.
 
 </div>
 
@@ -82,6 +82,27 @@ It lets you insert special characters, icons, favorites, custom entries and shor
       </p>
     </td>
   </tr>
+  <tr>
+    <td width="40%">
+      <div align="center"><h3>🔁 Auto Symbol Replacement</h3></div>
+      <p>Optional vanilla-chat helper that turns small text shortcuts into real symbols while you type.</p>
+      <p>Examples include <code>&lt;3</code>, <code>:dice:</code>, <code>:clock:</code>, letter markers like <code>[a]</code> and custom shortcuts created in the config window.</p>
+      <p>
+        <img src="https://img.shields.io/badge/Vanilla%20Chat-Only-red?style=flat-square" />
+        <img src="https://img.shields.io/badge/Custom%20Rules-✔-gold?style=flat-square" />
+        <img src="https://img.shields.io/badge/Commands%20Ignored-✔-gold?style=flat-square" />
+      </p>
+    </td>
+    <td width="40%">
+      <div align="center"><h3>🧩 Text-to-Symbol Manager</h3></div>
+      <p>The <code>Chat Auto-Symbol List</code> window shows all built-in replacements and lets you create safe custom replacements.</p>
+      <p>Custom text needs a wrapper like <code>:name:</code>, <code>[name]</code>, <code>;name;</code>, <code>-name-</code> or <code>=name=</code>, keeping normal words from being replaced by accident.</p>
+      <p>
+        <img src="https://img.shields.io/badge/Built--in%20List-✔-00cec9?style=flat-square" />
+        <img src="https://img.shields.io/badge/Validation-✔-00cec9?style=flat-square" />
+      </p>
+    </td>
+  </tr>
 </table>
 
 </div>
@@ -100,6 +121,7 @@ It lets you insert special characters, icons, favorites, custom entries and shor
 ![Custom Entries](https://img.shields.io/badge/Custom%20Entries-✔-brightgreen?style=flat-square)
 ![IPC Integration](https://img.shields.io/badge/IPC%20Integration-✔-brightgreen?style=flat-square)
 ![Background Opacity](https://img.shields.io/badge/Background%20Opacity-✔-brightgreen?style=flat-square)
+![Auto Symbol Replacement](https://img.shields.io/badge/Auto%20Symbol%20Replacement-✔-gold?style=flat-square)
 ![Plugin Window Direct Insert](https://img.shields.io/badge/Other%20Plugins%20Window-✘-red?style=flat-square)
 
 </div>
@@ -190,6 +212,35 @@ The Custom Entries input also supports opening the symbol list through the confi
 
 ---
 
+### 🔁 Automatic Text to Symbol
+
+`Automatic replace text to symbol` is an optional vanilla-chat feature. When it is enabled, QuickSymbols watches the current vanilla chat input and replaces supported text shortcuts with their real symbols.
+
+Examples:
+
+| Typed text | Result |
+| --- | --- |
+| `<3` | `♥` |
+| `:dice:` | FFXIV dice symbol |
+| `:clock:` | FFXIV clock symbol |
+| `[a]` to `[z]` | FFXIV letter marker symbols |
+| `[1]` to `[31]` | FFXIV number marker symbols |
+
+Custom replacements can be created from the `Chat Auto-Symbol List` window in `/qsconfig`.
+Custom shortcut names must use one of the safe wrappers below:
+
+| Format | Example |
+| --- | --- |
+| `:name:` | `:star:` |
+| `[name]` | `[star]` |
+| `;name;` | `;star;` |
+| `-name-` | `-star-` |
+| `=name=` | `=star=` |
+
+This feature is intentionally limited to **vanilla chat only** and it will not run on messages that start with `/`, so normal commands are not rewritten.
+
+---
+
 <a id="supported-inputs"></a>
 <div align="center">
 
@@ -230,6 +281,8 @@ The Custom Entries input also supports opening the symbol list through the confi
 | Use Dalamud theme | Uses Dalamud colors for the popup instead of FFXIV theme |
 | Background opacity | Adjusts popup and symbol background opacity |
 | Close popup on lost focus | Closes the popup when clicking outside of it |
+| Automatic text to symbol | Enables vanilla chat text shortcuts such as `<3`, `:dice:` and customs |
+| Chat Auto-Symbol List | Opens the replacement list and custom replacement creator |
 | Custom Entries | Adds, edits or removes custom entries |
 
 ---
