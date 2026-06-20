@@ -105,6 +105,11 @@ It lets you insert special characters, icons, favorites, custom entries, short s
   </tr>
 </table>
 
+<div align="center">
+<img width="400" height="300" alt="image" src="https://github.com/user-attachments/assets/edcdcf9c-cc10-4a8f-b4f9-89eeac830cfe" />
+ <img width="400" height="300" alt="feature" src="https://github.com/user-attachments/assets/c20557f5-fc78-4081-8d0e-f6eafbbae16a" />
+</div>
+
 </div>
 
 <div align="center">
