@@ -1039,6 +1039,11 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
 
             ImGui.SameLine(0f, 6f * ImGuiHelpers.GlobalScale);
             this.DrawHelpIcon("QuickSymbolsSetKeybindHelp", "Click specificaly the button 'Set Keybind' and hit the Keys combo you want to save.\nIf you press the Keybind without having any kind of input text field in focus,\nnothing will show up.");
+
+            ImGui.SameLine(0f, 9f * ImGuiHelpers.GlobalScale);
+            ImGui.TextUnformatted("Chat2:");
+            ImGui.SameLine(0f, 3f * ImGuiHelpers.GlobalScale);
+            this.DrawChat2DisclaimerIcon();
         }
 
         return changed;
@@ -1103,6 +1108,51 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         if (hovered)
         {
             ImGui.SetTooltip(tooltip);
+        }
+    }
+
+    private void DrawChat2DisclaimerIcon()
+    {
+        const int Chat2Icon = 0xF086;
+
+        var scale = ImGuiHelpers.GlobalScale;
+        var text = char.ConvertFromUtf32(Chat2Icon);
+        var iconFont = PushQuickSymbolsIconFont();
+        var textSize = ImGui.CalcTextSize(text);
+        iconFont?.Dispose();
+
+        var size = new Vector2(Math.Max(ImGui.GetTextLineHeight(), textSize.X + 6f * scale), ImGui.GetFrameHeight());
+        var pos = ImGui.GetCursorScreenPos();
+        ImGui.InvisibleButton("##QuickSymbolsChat2Disclaimer", size);
+        var hovered = ImGui.IsItemHovered();
+        var active = ImGui.IsItemActive();
+        var drawList = ImGui.GetWindowDrawList();
+        var color = active
+            ? new Vector4(0.82f, 0.50f, 1f, 1f)
+            : hovered
+                ? new Vector4(0.76f, 0.50f, 1f, 1f)
+                : ImGui.GetStyle().Colors[(int)ImGuiCol.Text];
+
+        iconFont = PushQuickSymbolsIconFont();
+        drawList.AddText(pos + (size - textSize) * 0.5f, ImGui.GetColorU32(color), text);
+        iconFont?.Dispose();
+
+        if (hovered)
+        {
+            using var tooltip = ImRaii.Tooltip();
+            ImGui.PushTextWrapPos(ImGui.GetFontSize() * 28f);
+            ImGui.TextUnformatted("Chat2 Compatibility Disclaimer:");
+            ImGui.Spacing();
+            ImGui.TextWrapped("I heard and appreciate everyone feedback about Plugins compatibility.");
+            ImGui.Spacing();
+            ImGui.TextWrapped("Chat2 uses a Dalamud (ImGuii) interface for its chat, which prevents QuickSymbols from inserting its usual symbols like it does in vanilla chat and native windows.");
+            ImGui.Spacing();
+            ImGui.TextWrapped("QuickSymbols provides a way of compatibility through IPC, allowing other plugins to integrate with it to let they plugin be compatible with QuickSymbols.");
+            ImGui.Spacing();
+            ImGui.TextWrapped("Plugin compatibility is ultimately up to the individual plugins, not QuickSymbols itself.");
+            ImGui.Spacing();
+            ImGui.TextWrapped("Thank You for using QuickSymbols! I hope more and more plugins opt for the compatibility.");
+            ImGui.PopTextWrapPos();
         }
     }
 
