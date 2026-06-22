@@ -1143,15 +1143,15 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
             ImGui.PushTextWrapPos(ImGui.GetFontSize() * 28f);
             ImGui.TextUnformatted("Chat2 Compatibility Disclaimer:");
             ImGui.Spacing();
-            ImGui.TextWrapped("I heard and appreciate everyone feedback about Plugins compatibility.");
+            ImGui.TextWrapped("I heard and appreciate everyone feedback about Plugins compatibility <3.");
             ImGui.Spacing();
-            ImGui.TextWrapped("Chat2 uses a Dalamud (ImGuii) interface for its chat, which prevents QuickSymbols from inserting its usual symbols like it does in vanilla chat and native windows.");
+            ImGui.TextWrapped("Chat2 specificaly, uses a Dalamud (ImGuii) interface for its chat, which prevents QuickSymbols from inserting its usual symbols like it does in vanilla chat and native windows.");
             ImGui.Spacing();
-            ImGui.TextWrapped("QuickSymbols provides a way of compatibility through IPC, allowing other plugins to integrate with it to let they plugin be compatible with QuickSymbols.");
+            ImGui.TextWrapped("QuickSymbols already provides a way of compatibility, allowing other plugins to be compatible with QuickSymbols.");
             ImGui.Spacing();
             ImGui.TextWrapped("Plugin compatibility is ultimately up to the individual plugins, not QuickSymbols itself.");
             ImGui.Spacing();
-            ImGui.TextWrapped("Thank You for using QuickSymbols! I hope more and more plugins opt for the compatibility.");
+            ImGui.TextWrapped("Thank You for using QuickSymbols! I hope more and more plugins opt for the compatibility soon.");
             ImGui.PopTextWrapPos();
         }
     }
