@@ -580,7 +580,7 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
         ImGui.BulletText("Spaces are not allowed.");
         ImGui.BulletText("Texts cannot start with / or \\.");
         ImGui.BulletText("You cannot reuse an existing text, existing name, or existing symbol.");
-        ImGui.BulletText("Auto replacement is skipped for vanilla chat commands, meaning messages starting with / are ignored.");
+        ImGui.BulletText("Auto replacement is skipped for most slash commands, but works in /tell, /p, /party, /shout, /yell, /say, /a, /alliance, /y, /sh, /s, /n and /fc.");
 
         ImGui.Spacing();
         ImGui.TextColored(new Vector4(0.65f, 0.85f, 1f, 1f), "Examples");
@@ -1618,7 +1618,38 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
     // Earlier attempts tried to track key presses but that breaks as soon as someone mistypes,
     // clicks the caret somewhere else, uses arrows or fixes the text with backspace. Reading the
     // input text itself is much closer to how people actually type. I only look for a replacement
-    // at the end of the current message and skip anything starting with "/" so commands are left alone.
+    // at the end of the current message. Most slash commands are ignored, but normal chat-channel commands are allowed.
+
+    private static bool ShouldSkipAutoSymbolReplacement(string text)
+    {
+        if (!text.StartsWith("/", StringComparison.Ordinal))
+            return false;
+
+        ReadOnlySpan<char> span = text.AsSpan().TrimStart();
+        if (span.Length <= 1 || span[0] != '/')
+            return false;
+
+        var end = 1;
+        while (end < span.Length && !char.IsWhiteSpace(span[end]))
+            end++;
+
+        var command = span[1..end];
+
+        return !command.Equals("tell", StringComparison.OrdinalIgnoreCase)
+            && !command.Equals("p", StringComparison.OrdinalIgnoreCase)
+            && !command.Equals("party", StringComparison.OrdinalIgnoreCase)
+            && !command.Equals("shout", StringComparison.OrdinalIgnoreCase)
+            && !command.Equals("yell", StringComparison.OrdinalIgnoreCase)
+            && !command.Equals("say", StringComparison.OrdinalIgnoreCase)
+            && !command.Equals("a", StringComparison.OrdinalIgnoreCase)
+            && !command.Equals("alliance", StringComparison.OrdinalIgnoreCase)
+            && !command.Equals("y", StringComparison.OrdinalIgnoreCase)
+            && !command.Equals("sh", StringComparison.OrdinalIgnoreCase)
+            && !command.Equals("s", StringComparison.OrdinalIgnoreCase)
+            && !command.Equals("n", StringComparison.OrdinalIgnoreCase)
+            && !command.Equals("fc", StringComparison.OrdinalIgnoreCase);
+    }
+
     private void TryRewriteHeartShortcutFromChatKeys()
     {
         if (!this.Config.ReplaceSpecificTextsForSymbols)
@@ -1654,7 +1685,7 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
             }
 
             var text = GetTextInputString(input);
-            if (string.IsNullOrEmpty(text) || text.StartsWith("/", StringComparison.Ordinal) || !this.TryGetTrailingTextReplacement(text, out var charsToRemove, out var symbol))
+            if (string.IsNullOrEmpty(text) || ShouldSkipAutoSymbolReplacement(text) || !this.TryGetTrailingTextReplacement(text, out var charsToRemove, out var symbol))
             {
                 return;
             }
@@ -1702,7 +1733,7 @@ public sealed unsafe partial class Plugin : IDalamudPlugin
             }
 
             var text = GetTextInputString(input);
-            if (text.StartsWith("/", StringComparison.Ordinal)
+            if (ShouldSkipAutoSymbolReplacement(text)
                 || !this.TryGetTrailingTextReplacement(text, out var currentRemove, out var currentSymbol)
                 || currentRemove != charsToRemove
                 || !string.Equals(currentSymbol, symbol, StringComparison.Ordinal))
